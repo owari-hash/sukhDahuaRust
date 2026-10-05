@@ -176,51 +176,31 @@ fn handle_execute_open(payload: Payload, socket: RawClient, tag: &str) {
     }
 
     // Хаалга нээгдсэн бол самбарт дугаарыг гаргана — орох, гарах хоёулаа.
-    // Байрлал нь л өөр (доор).
     if result.is_ok() && !plate.is_empty() {
-        let orokh = CAMERA_MANAGER
-            .get()
-            .map(|m| m.is_entrance(&ip))
-            .unwrap_or(false);
-
-        // Гарах камер дээр ДҮН байхгүй (`execute-open` нь зөвхөн ip/plate
-        // авчирдаг) тул дүнгийн мөрийг ХУДАЛ "0T"-ээр дүүргэхгүй — дугаар
-        // ба байгууллагын нэрийг л гаргана. Дүн ирдэг болбол орохтой ижил
-        // `sambar_bichye` рүү шилжүүлнэ.
-        {
-            let ip_s = ip.clone();
-            let plate_s = plate.clone();
-            let tag_s = tag.to_string();
-            let baig = CAMERA_MANAGER
-                .get()
-                .map(|m| m.org_name().to_string())
-                .unwrap_or_default();
-            // Socket-ийн callback нь синхрон, tokio-гийн гадна ажилладаг тул
-            // богино настай runtime үүсгэж, байгаа async замыг дахин ашиглана.
-            std::thread::spawn(move || {
-                let rt = match tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                {
-                    Ok(rt) => rt,
-                    Err(e) => {
-                        error!("❌ [{tag_s} SAMBAR] runtime үүсгэж чадсангүй: {e}");
-                        return;
-                    }
-                };
-                let khariu = if orokh {
-                    rt.block_on(crate::api::sambar_bichye(&ip_s, &plate_s, "0"))
-                } else {
-                    rt.block_on(crate::api::sambar_medegdel(&ip_s, &plate_s, &baig, ""))
-                };
-                match khariu {
-                    Ok(body) => info!(
-                        "🔆 [{tag_s} SAMBAR] ip={ip_s} plate={plate_s} хариу={body}"
-                    ),
-                    Err(e) => error!("❌ [{tag_s} SAMBAR] ip={ip_s} aldaa={e}"),
+        let turul = v.get("turul").and_then(|t| t.as_str()).unwrap_or("Оршин суугч").to_string();
+        let ip_s = ip.clone();
+        let plate_s = plate.clone();
+        let turul_s = turul.clone();
+        let tag_s = tag.to_string();
+        std::thread::spawn(move || {
+            let rt = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(rt) => rt,
+                Err(e) => {
+                    error!("❌ [{tag_s} SAMBAR] runtime үүсгэж чадсангүй: {e}");
+                    return;
                 }
-            });
-        }
+            };
+            let khariu = rt.block_on(crate::api::sambar_registered(&ip_s, &plate_s, &turul_s));
+            match khariu {
+                Ok(body) => info!(
+                    "🔆 [{tag_s} SAMBAR] ip={ip_s} plate={plate_s} turul={turul_s} хариу={body}"
+                ),
+                Err(e) => error!("❌ [{tag_s} SAMBAR] ip={ip_s} aldaa={e}"),
+            }
+        });
     }
 
     if !command_id.is_empty() {
@@ -283,9 +263,9 @@ fn handle_sambar_show(payload: Payload, tag: &str) {
             .get()
             .map(|m| m.org_name().to_string())
             .unwrap_or_default();
-        let murnuud: Vec<&str> = vec![&plate, &turul, &dun_t, &baig];
+        // let murnuud: Vec<&str> = vec![&plate, &turul, &dun_t, &baig];
 
-        match rt.block_on(crate::api::sambar_murnuud(&ip, &murnuud)) {
+        match rt.block_on(crate::api::sambar_exit(&ip, &plate, &turul, &dun)) {
             Ok(body) => info!(
                 "🔆 [{tag_s} SAMBAR] бичигдлээ turul={turul} dun={dun} хариу={body}"
             ),

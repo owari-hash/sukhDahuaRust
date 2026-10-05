@@ -86,17 +86,22 @@ impl PlateService {
         // хөшиж үлддэг байв. Жолоочид шалтгааныг нь харуулна — серверийн
         // ӨӨРИЙНХ нь үгээр, энд орчуулга зохиохгүй.
         if status.is_success() {
-            if let Some(shaltgaan) = serde_json::from_str::<serde_json::Value>(&text)
-                .ok()
-                .and_then(|v| v.get("aldaa").and_then(|a| a.as_str()).map(String::from))
-            {
-                let ip = payload.CAMERA_IP.to_string();
-                let dugaar = payload.mashiniiDugaar.to_string();
-                warn!("PLATE DENIED | plate={dugaar} camera={ip} shaltgaan={shaltgaan}");
-                if let Err(e) =
-                    crate::api::sambar_medegdel(&ip, &dugaar, &shaltgaan, "").await
-                {
-                    error!("❌ [SAMBAR] татгалзлыг бичиж чадсангүй: {e}");
+            let json_val: Option<serde_json::Value> = serde_json::from_str(&text).ok();
+            let dugaar = payload.mashiniiDugaar.to_string();
+            let ip = payload.CAMERA_IP.to_string();
+
+            if let Some(aldaa) = json_val.as_ref().and_then(|v| v.get("aldaa").and_then(|a| a.as_str())) {
+                warn!("PLATE DENIED | plate={dugaar} camera={ip} shaltgaan={aldaa}");
+                if let Err(e) = crate::api::sambar_burtgelgui(&ip, &dugaar).await {
+                    error!("❌ [SAMBAR] бүртгэлгүй машин бичиж чадсангүй: {e}");
+                }
+            } else {
+                let turul = json_val.as_ref()
+                    .and_then(|v| v.get("turul").and_then(|t| t.as_str()))
+                    .unwrap_or("Оршин суугч");
+                log::info!("PLATE APPROVED | plate={dugaar} camera={ip} turul={turul}");
+                if let Err(e) = crate::api::sambar_registered(&ip, &dugaar, turul).await {
+                    error!("❌ [SAMBAR] бүртгэлтэй машин бичиж чадсангүй: {e}");
                 }
             }
         }

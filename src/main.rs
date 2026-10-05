@@ -189,6 +189,17 @@ async fn run_app(cfg: Config) -> anyhow::Result<()> {
         });
     }
 
+    // 5b. Start idle screens for all cameras
+    for cam in &cfg.cameras {
+        let ip = cam.ip.clone();
+        tokio::spawn(async move {
+            log::info!("[{ip}] Идэвхгүй төлөвийн самбар тохируулж байна...");
+            if let Err(e) = api::sambar_idle(&ip).await {
+                log::warn!("[{ip}] Идэвхгүй төлөв тохируулахад алдаа: {e}");
+            }
+        });
+    }
+
     // 6. SDK heartbeat â€” checks gate connection every 60s, reconnects if dead
     tokio::spawn(async move {
         loop {

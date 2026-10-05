@@ -206,12 +206,18 @@ async fn sambar(Path((ip, text, dun)): Path<(String, String, String)>) -> impl I
     }
 }
 
-/// Самбарт бичих ҮНДСЭН үйлдэл.
-///
-/// HTTP төгсгөлөг ба хаалга нээгдэх үйл явдал ХОЁУЛАА үүнийг дууддаг —
-/// ингэснээр мөрийн байрлал, нэвтрэлт, порт хайлт нэг газар байна.
-pub async fn sambar_bichye(ip: &str, text: &str, dun: &str) -> anyhow::Result<String> {
-
+/// Самбарыг идэвхгүй (idle / standby) төлөвт шилжүүлнэ:
+/// Орох камер:
+///   Мөр 0: Компанийн нэр (company_name)
+///   Мөр 1: СӨХ-ийн нэр (org_name)
+///   Мөр 2: Зөвшөөрөлтэй машин
+///   Мөр 3: Системийн цаг (SysTime)
+/// Гарах камер:
+///   Мөр 0: Компанийн нэр (company_name)
+///   Мөр 1: СӨХ-ийн нэр (org_name)
+///   Мөр 2: Хоосон
+///   Мөр 3: Системийн цаг (SysTime)
+pub async fn sambar_idle(ip: &str) -> anyhow::Result<String> {
     let (password, is_entrance, org_name, company_name, preferred_port) = CAMERA_MANAGER
         .get()
         .map(|m| (
@@ -221,28 +227,23 @@ pub async fn sambar_bichye(ip: &str, text: &str, dun: &str) -> anyhow::Result<St
             m.company_name().to_string(),
             m.http_port_for_ip(ip).unwrap_or(80),
         ))
-        .unwrap_or(("admin123".to_string(), false, "Найрамдал".to_string(), "Найрамдал".to_string(), 80));
+        .unwrap_or(("admin123".to_string(), true, "Найрамдал".to_string(), "ParkEase".to_string(), 80));
 
     let http_port = crate::probe::resolve_port(ip, preferred_port).await;
     let (scheme, host) = crate::probe::scheme_and_host(ip, http_port);
 
-    let dun_t = format!("{}T", dun);
-    let line1 = if is_entrance { org_name.clone() } else { dun_t.clone() };
-    let line2 = if is_entrance { "Зөврөөшөлтэй машин".to_string() } else { org_name.clone() };
-    let carpass_0 = if is_entrance { company_name.clone() } else { "".to_string() };
+    let line2 = if is_entrance {
+        "str(Зөвшөөрөлтэй машин)".to_string()
+    } else {
+        "str()".to_string()
+    };
+
     let params = [
-        // Төлөв солигдох ЗАВСАР (секунд). Dahua-гийн SDK толгойд
-        // `nStatusChangeTime` нь 10 ~ 60 гэж ЗААГДСАН
-        // (NET_CFG_TRAFFIC_LATTICE_SCREEN_INFO). Өмнө нь 1 гэж явуулдаг
-        // байсан нь хүрээнээс ГАДУУР — төхөөрөмж ийм утгыг хүлээж авахгүй
-        // бөгөөд Dahua нь нэг параметр буруу бол setConfig-ийг БҮХЭЛД нь
-        // няцаадаг тул бусад мөр ч бичигдэхгүй өнгөрөх эрсдэлтэй байв.
         "TrafficLatticeScreen[0].StatusChangeTime=10".to_string(),
-        format!("TrafficLatticeScreen[0].Normal.Contents.[0]=str({text})"),
-        format!("TrafficLatticeScreen[0].Normal.Contents.[1]=str({line1})"),
-        format!("TrafficLatticeScreen[0].Normal.Contents.[2]=str({line2})"),
-        format!("TrafficLatticeScreen[0].CarPass.Contents.[0]=str({carpass_0})"),
-        "TrafficLatticeScreen[0].CarPass.Contents.[1]=SysTime".to_string(),
+        format!("TrafficLatticeScreen[0].Normal.Contents.[0]=str({company_name})"),
+        format!("TrafficLatticeScreen[0].Normal.Contents.[1]=str({org_name})"),
+        format!("TrafficLatticeScreen[0].Normal.Contents.[2]={line2}"),
+        "TrafficLatticeScreen[0].Normal.Contents.[3]=SysTime".to_string(),
     ];
 
     let url = format!(
@@ -250,18 +251,175 @@ pub async fn sambar_bichye(ip: &str, text: &str, dun: &str) -> anyhow::Result<St
         params.join("&")
     );
 
-    info!("[SAMBAR] URL: {url}");
+    info!("[SAMBAR_IDLE] is_entrance={is_entrance} URL: {url}");
+    send_sambar_request(&url, &password).await
+}
 
-    match send_sambar_request(&url, &password).await {
-        Ok(body) => {
-            info!("sambar response: {body}");
-            Ok(body)
-        }
-        Err(e) => {
-            error!("sambar Aldaa: {e}");
-            crate::probe::invalidate(ip);
-            Err(e)
-        }
+/// Бүртгэлгүй машин ирэх үед самбарт:
+///   Мөр 0: Улсын дугаар (жнь: 0818УЕВ)
+///   Мөр 1: Бүртгэлгүй машин
+///   Мөр 2: СӨХ-ийн нэр
+///   Мөр 3: Системийн цаг
+/// (8 секундын дараа автоматаар idle төлөв рүү буцна)
+pub async fn sambar_burtgelgui(ip: &str, plate: &str) -> anyhow::Result<String> {
+    let (password, org_name, preferred_port) = CAMERA_MANAGER
+        .get()
+        .map(|m| (
+            m.password_for_ip(ip),
+            m.org_name().to_string(),
+            m.http_port_for_ip(ip).unwrap_or(80),
+        ))
+        .unwrap_or(("admin123".to_string(), "Найрамдал".to_string(), 80));
+
+    let http_port = crate::probe::resolve_port(ip, preferred_port).await;
+    let (scheme, host) = crate::probe::scheme_and_host(ip, http_port);
+
+    let params = [
+        "TrafficLatticeScreen[0].StatusChangeTime=10".to_string(),
+        format!("TrafficLatticeScreen[0].Normal.Contents.[0]=str({plate})"),
+        "TrafficLatticeScreen[0].Normal.Contents.[1]=str(Бүртгэлгүй машин)".to_string(),
+        format!("TrafficLatticeScreen[0].Normal.Contents.[2]=str({org_name})"),
+        "TrafficLatticeScreen[0].Normal.Contents.[3]=SysTime".to_string(),
+    ];
+
+    let url = format!(
+        "{scheme}://{host}/cgi-bin/configManager.cgi?action=setConfig&{}",
+        params.join("&")
+    );
+
+    info!("[SAMBAR_BURTGELGUI] URL: {url}");
+    let res = send_sambar_request(&url, &password).await;
+
+    // 8 секундын дараа автоматаар idle горим руу буцна
+    let ip_clone = ip.to_string();
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_secs(8)).await;
+        let _ = sambar_idle(&ip_clone).await;
+    });
+
+    res
+}
+
+/// Бүртгэлтэй машин ирэх / нэвтрэх үед:
+///   Мөр 0: Улсын дугаар
+///   Мөр 1: Төрөл (Оршин суугч / Зочин / Ажилтан / СӨХ / VIP)
+///   Мөр 2: СӨХ-ийн нэр
+///   Мөр 3: Системийн цаг
+/// (8 секундын дараа автоматаар idle горим руу буцна)
+pub async fn sambar_registered(ip: &str, plate: &str, turul: &str) -> anyhow::Result<String> {
+    let (password, org_name, preferred_port) = CAMERA_MANAGER
+        .get()
+        .map(|m| (
+            m.password_for_ip(ip),
+            m.org_name().to_string(),
+            m.http_port_for_ip(ip).unwrap_or(80),
+        ))
+        .unwrap_or(("admin123".to_string(), "Тайм Таур".to_string(), 80));
+
+    let http_port = crate::probe::resolve_port(ip, preferred_port).await;
+    let (scheme, host) = crate::probe::scheme_and_host(ip, http_port);
+
+    let display_turul = if turul.trim().is_empty() {
+        "Оршин суугч"
+    } else {
+        turul.trim()
+    };
+
+    let params = [
+        "TrafficLatticeScreen[0].StatusChangeTime=10".to_string(),
+        format!("TrafficLatticeScreen[0].Normal.Contents.[0]=str({plate})"),
+        format!("TrafficLatticeScreen[0].Normal.Contents.[1]=str({display_turul})"),
+        format!("TrafficLatticeScreen[0].Normal.Contents.[2]=str({org_name})"),
+        "TrafficLatticeScreen[0].Normal.Contents.[3]=SysTime".to_string(),
+    ];
+
+    let url = format!(
+        "{scheme}://{host}/cgi-bin/configManager.cgi?action=setConfig&{}",
+        params.join("&")
+    );
+
+    info!("[SAMBAR_REGISTERED] URL: {url}");
+    let res = send_sambar_request(&url, &password).await;
+
+    // 8 секундын дараа автоматаар idle горим руу буцна
+    let ip_clone = ip.to_string();
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_secs(8)).await;
+        let _ = sambar_idle(&ip_clone).await;
+    });
+
+    res
+}
+
+/// Гарцын төлбөр болон төрлийг харуулах:
+///   Мөр 0: Улсын дугаар
+///   Мөр 1: Төрөл эсвэл Дүн
+///   Мөр 2: Дүн эсвэл СӨХ-ийн нэр
+///   Мөр 3: Системийн цаг
+pub async fn sambar_exit(ip: &str, plate: &str, turul: &str, dun: &str) -> anyhow::Result<String> {
+    let (password, org_name, preferred_port) = CAMERA_MANAGER
+        .get()
+        .map(|m| (
+            m.password_for_ip(ip),
+            m.org_name().to_string(),
+            m.http_port_for_ip(ip).unwrap_or(80),
+        ))
+        .unwrap_or(("admin123".to_string(), "Найрамдал".to_string(), 80));
+
+    let http_port = crate::probe::resolve_port(ip, preferred_port).await;
+    let (scheme, host) = crate::probe::scheme_and_host(ip, http_port);
+
+    let dun_t = format!("{}T", dun);
+    let line1 = if !turul.trim().is_empty() && turul != "Үйлчлүүлэгч" {
+        turul.trim().to_string()
+    } else if dun != "0" && !dun.is_empty() {
+        dun_t.clone()
+    } else {
+        "Үнэгүй".to_string()
+    };
+
+    let line2 = if line1 != dun_t && dun != "0" && !dun.is_empty() {
+        dun_t
+    } else {
+        org_name
+    };
+
+    let params = [
+        "TrafficLatticeScreen[0].StatusChangeTime=10".to_string(),
+        format!("TrafficLatticeScreen[0].Normal.Contents.[0]=str({plate})"),
+        format!("TrafficLatticeScreen[0].Normal.Contents.[1]=str({line1})"),
+        format!("TrafficLatticeScreen[0].Normal.Contents.[2]=str({line2})"),
+        "TrafficLatticeScreen[0].Normal.Contents.[3]=SysTime".to_string(),
+    ];
+
+    let url = format!(
+        "{scheme}://{host}/cgi-bin/configManager.cgi?action=setConfig&{}",
+        params.join("&")
+    );
+
+    info!("[SAMBAR_EXIT] URL: {url}");
+    let res = send_sambar_request(&url, &password).await;
+
+    // 8 секундын дараа автоматаар idle горим руу буцна
+    let ip_clone = ip.to_string();
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_secs(8)).await;
+        let _ = sambar_idle(&ip_clone).await;
+    });
+
+    res
+}
+
+pub async fn sambar_bichye(ip: &str, text: &str, dun: &str) -> anyhow::Result<String> {
+    let is_entrance = CAMERA_MANAGER
+        .get()
+        .map(|m| m.is_entrance(ip))
+        .unwrap_or(false);
+
+    if is_entrance {
+        sambar_registered(ip, text, "Оршин суугч").await
+    } else {
+        sambar_exit(ip, text, "", dun).await
     }
 }
 
