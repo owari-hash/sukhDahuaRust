@@ -166,68 +166,76 @@ fn handle_execute_open(payload: Payload, socket: RawClient, tag: &str) {
 
     info!("🚪 [{tag} GATE] Received: ip={ip} plate={plate_log} id={command_id}");
 
-    let result = CAMERA_MANAGER.get()
-        .map(|m| m.open_gate(&ip, Some(plate.as_str())))
-        .unwrap_or_else(|| Err("camera_manager_not_initialized".to_string()));
-
-    match &result {
-        Ok(()) => info!("🚪 [{tag} GATE] Result: ip={ip} plate={plate_log} success=true"),
-        Err(e) => error!("🚪 [{tag} GATE] Result: ip={ip} plate={plate_log} success=false error={e}"),
-    }
-
-    // ЗӨВХӨН ОРЦЫН самбарт бичнэ.
+    // ХААЛГА НЭЭХИЙГ ТУСДАА УРСГАЛД гүйцэтгэнэ.
     //
-    // `execute-open` нь гарах үед ч ирдэг. Гарцын самбарыг `sambar-show`
-    // (→ `sambar_exit`) аль хэдийн бичдэг бөгөөд тэнд төрөл нь хадгалагдсан
-    // `uilchluulegch.turul`-ээс, ДҮН нь хамт ирдэг — найдвартай. Харин
-    // `execute-open`-ий төрөл нь урилгын хайлтаас гардаг бөгөөд гарах үед
-    // урилга нь идэвхтэй (tuluv 0/1) байхаа больсон байж болно. Хоёулаа
-    // нэг самбар руу бичвэл уралдаж, сүүлд нь буусан нь ялна — зочин
-    // "Үйлчлүүлэгч" болж харагдах эрсдэлтэй. Иймд гарцад бичихгүй.
-    let orts = crate::camera_manager::CAMERA_MANAGER
-        .get()
-        .map(|m| m.is_entrance(&ip))
-        .unwrap_or(true);
+    // `open_gate` нь удаан блоклож болно: эхний `control_device` 5 сек,
+    // дараа нь `reconnect_single` (бүтэн дахин нэвтрэлт), дараа нь дахин
+    // 5 сек, эцэст нь дугаартай гурав дахь оролдлого. Нийт нь серверийн
+    // 8 секундын хүлээлтээс ХЭТЭРДЭГ (neeyeRoute.js:310).
+    //
+    // Үүнийг сокетын хүлээн авагч дотор шууд дуудвал:
+    //   1) `execute-open-result` цагтаа буцдаггүй → "Хаалга нээгдсэнгүй,
+    //      timeout" — хаалга нь үнэндээ нээгдсэн ч байж магадгүй;
+    //   2) ард нь дараалсан бусад үйл явдал (жишээ нь `sambar-show`)
+    //      боловсруулагдахгүй хүлээнэ — самбар хөшиж үлддэг.
+    //
+    // Handle эрүүл үед эхний дуудлага шууд амжилттай болдог тул асуудал
+    // ҮЕ ҮЕ л илэрдэг — яг тэр үед handle нь хуучирсан байдаг.
+    let tag_urs = tag.to_string();
+    std::thread::spawn(move || {
+        let result = CAMERA_MANAGER.get()
+            .map(|m| m.open_gate(&ip, Some(plate.as_str())))
+            .unwrap_or_else(|| Err("camera_manager_not_initialized".to_string()));
 
-    if result.is_ok() && !plate.is_empty() && orts {
-        // Сервер төрөл илгээгээгүй бол ОРШИН СУУГЧ гэж ТААХГҮЙ — тэр нь
-        // төлбөртэй үйлчлүүлэгчийг үнэгүй оршин суугч мэт харуулдаг байв.
-        // Хоосон үлдээвэл доорх бичигч нь СӨХ-ийн нэрийг тавина.
-        let turul = v.get("turul").and_then(|t| t.as_str()).unwrap_or_default().to_string();
-        let ip_s = ip.clone();
-        let plate_s = plate.clone();
-        let turul_s = turul.clone();
-        let tag_s = tag.to_string();
-        std::thread::spawn(move || {
+        let plate_log = if plate.is_empty() { "-" } else { plate.as_str() };
+        match &result {
+            Ok(()) => info!("🚪 [{tag_urs} GATE] Result: ip={ip} plate={plate_log} success=true"),
+            Err(e) => error!("🚪 [{tag_urs} GATE] Result: ip={ip} plate={plate_log} success=false error={e}"),
+        }
+
+        // Хариуг НЭН ТҮРҮҮНД буцаана — самбарын бичилт үүнийг хүлээлгэхгүй.
+        if !command_id.is_empty() {
+            let result_payload = serde_json::json!({
+                "commandId": command_id,
+                "ip": ip,
+                "success": result.is_ok(),
+                "error": result.as_ref().err(),
+            });
+            let _ = socket.emit("execute-open-result", result_payload);
+        }
+
+        // ЗӨВХӨН ОРЦЫН самбарт бичнэ.
+        //
+        // `execute-open` нь гарах үед ч ирдэг. Гарцын самбарыг `sambar-show`
+        // (→ `sambar_exit`) бичдэг бөгөөд тэнд төрөл нь хадгалагдсан
+        // `uilchluulegch.turul`-ээс, ДҮН нь хамт ирдэг. Хоёулаа нэг самбар
+        // руу бичвэл уралдана — зочин "Үйлчлүүлэгч" болж харагдах эрсдэлтэй.
+        let orts = CAMERA_MANAGER
+            .get()
+            .map(|m| m.is_entrance(&ip))
+            .unwrap_or(true);
+
+        if result.is_ok() && !plate.is_empty() && orts {
+            // Сервер төрөл илгээгээгүй бол ОРШИН СУУГЧ гэж ТААХГҮЙ.
+            let turul = v.get("turul").and_then(|t| t.as_str()).unwrap_or_default().to_string();
             let rt = match tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
             {
                 Ok(rt) => rt,
                 Err(e) => {
-                    error!("❌ [{tag_s} SAMBAR] runtime үүсгэж чадсангүй: {e}");
+                    error!("❌ [{tag_urs} SAMBAR] runtime үүсгэж чадсангүй: {e}");
                     return;
                 }
             };
-            let khariu = rt.block_on(crate::api::sambar_registered(&ip_s, &plate_s, &turul_s));
-            match khariu {
+            match rt.block_on(crate::api::sambar_registered(&ip, &plate, &turul)) {
                 Ok(body) => info!(
-                    "🔆 [{tag_s} SAMBAR] ip={ip_s} plate={plate_s} turul={turul_s} хариу={body}"
+                    "🔆 [{tag_urs} SAMBAR] ip={ip} plate={plate} turul={turul} хариу={body}"
                 ),
-                Err(e) => error!("❌ [{tag_s} SAMBAR] ip={ip_s} aldaa={e}"),
+                Err(e) => error!("❌ [{tag_urs} SAMBAR] ip={ip} aldaa={e}"),
             }
-        });
-    }
-
-    if !command_id.is_empty() {
-        let result_payload = serde_json::json!({
-            "commandId": command_id,
-            "ip": ip,
-            "success": result.is_ok(),
-            "error": result.err(),
-        });
-        let _ = socket.emit("execute-open-result", result_payload);
-    }
+        }
+    });
 }
 
 /// Сервер тооцоолсон төлбөрийн дүнг гарцын самбарт гаргана.
