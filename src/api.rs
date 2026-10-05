@@ -38,6 +38,7 @@ pub async fn run_api_server(port: u16) {
         .route("/api/sambar/:ip/:text/:dun", get(sambar))
         .route("/api/sambarOgnootoi/:ip/:text/:dun/:start/:end",    get(sambar_ognootoi))
         .route("/api/sambarConfig/:ip",      get(sambar_config))
+        .route("/api/sambarSergeekh/:ip",    get(sambar_sergeekh))
         .route("/api/restartConnections",    post(restart_connections))
         .route("/api/health",                get(health))
         .fallback(handler_404)
@@ -85,6 +86,47 @@ async fn neeye(Path(ip): Path<String>) -> impl IntoResponse {
 /// төхөөрөмжийн жинхэнэ түлхүүрийн нэртэй таарч байгаа эсэх нь тодорхойгүй.
 /// Энэ төгсгөлөг нь `action=getConfig`-оор ЯГ ямар түлхүүр байгааг буцаана —
 /// дараа нь түүнд нь тааруулж бичнэ.
+/// Самбарын тохиргоог ЗАВОДЫН АНХНЫ байдалд нь буцаана.
+///
+/// Яагаад хэрэгтэй вэ: SDK-ийн `CLIENT_SetConfig` нь бүтцийг БҮХЭЛД нь
+/// дарж бичдэг. Бидний Rust дээрх `NET_CFG_TRAFFIC_LATTICE_SCREEN_INFO`
+/// бүтэц нь таамагласан талбартай байсан (`stuLogoInfo`, `stuAlarmNoticeInfo`
+/// нь 512 байтын ОРЛУУЛАГЧ) тул төхөөрөмж дээрх жинхэнэ байрлалтай таараагүй
+/// — улмаар хадгалагдсан тохиргоо эвдэрч, бүх мөр алга болсон ("No data").
+///
+/// `action=restore` нь ЗӨВХӨН нэрлэсэн хэсгийг (TrafficLatticeScreen)
+/// анхны байдалд оруулна — төхөөрөмжийг БҮХЭЛД нь factory reset хийхгүй.
+/// Үүний дараа мөрүүд нь зөв бүтэцтэйгээр дахин үүсэх тул CGI-аар бичих
+/// боломжтой болно.
+async fn sambar_sergeekh(Path(ip): Path<String>) -> impl IntoResponse {
+    info!("sambarSergeekh called for ip: {ip}");
+
+    let (password, preferred_port) = CAMERA_MANAGER
+        .get()
+        .map(|m| (m.password_for_ip(&ip), m.http_port_for_ip(&ip).unwrap_or(80)))
+        .unwrap_or_else(|| ("admin123".to_string(), 80));
+
+    let http_port = crate::probe::resolve_port(&ip, preferred_port).await;
+    let (scheme, host) = crate::probe::scheme_and_host(&ip, http_port);
+
+    let url = format!(
+        "{scheme}://{host}/cgi-bin/configManager.cgi?action=restore&names[0]=TrafficLatticeScreen"
+    );
+    info!("[SAMBAR_SERGEEKH] URL: {url}");
+
+    match send_sambar_request(&url, &password).await {
+        Ok(body) => {
+            info!("sambarSergeekh хариу: {body}");
+            (StatusCode::OK, body)
+        }
+        Err(e) => {
+            error!("sambarSergeekh Aldaa: {e}");
+            crate::probe::invalidate(&ip);
+            (StatusCode::INTERNAL_SERVER_ERROR, format!("aldaa: {e}"))
+        }
+    }
+}
+
 async fn sambar_config(Path(ip): Path<String>) -> impl IntoResponse {
     info!("sambarConfig called for ip: {ip}");
 
@@ -126,7 +168,7 @@ pub async fn sambar_murnuud(ip: &str, murnuud: &[&str]) -> anyhow::Result<String
     let http_port = crate::probe::resolve_port(ip, preferred_port).await;
     let (scheme, host) = crate::probe::scheme_and_host(ip, http_port);
 
-    let mut params = vec!["TrafficLatticeScreen[0].StatusChangeTime=10".to_string()];
+    let mut params = vec!["TrafficLatticeScreen[0].StatusChangeTime=1".to_string()];
     for (i, mur) in murnuud.iter().enumerate().take(4) {
         params.push(format!(
             "TrafficLatticeScreen[0].Normal.Contents.[{i}]=str({mur})"
@@ -172,7 +214,7 @@ pub async fn sambar_medegdel(
     let (scheme, host) = crate::probe::scheme_and_host(ip, http_port);
 
     let params = [
-        "TrafficLatticeScreen[0].StatusChangeTime=10".to_string(),
+        "TrafficLatticeScreen[0].StatusChangeTime=1".to_string(),
         format!("TrafficLatticeScreen[0].Normal.Contents.[0]=str({mur0})"),
         format!("TrafficLatticeScreen[0].Normal.Contents.[1]=str({mur1})"),
         format!("TrafficLatticeScreen[0].Normal.Contents.[2]=str({mur2})"),
@@ -239,12 +281,14 @@ pub async fn sambar_idle(ip: &str) -> anyhow::Result<String> {
     };
 
     let params = [
-        "TrafficLatticeScreen[0].StatusChangeTime=10".to_string(),
+        "TrafficLatticeScreen[0].StatusChangeTime=1".to_string(),
         format!("TrafficLatticeScreen[0].Normal.Contents.[0]=str({company_name})"),
         format!("TrafficLatticeScreen[0].Normal.Contents.[1]=str({org_name})"),
         format!("TrafficLatticeScreen[0].Normal.Contents.[2]={line2}"),
         "TrafficLatticeScreen[0].Normal.Contents.[3]=SysTime".to_string(),
     ];
+
+    let params = khoyr_tulevt(&params);
 
     let url = format!(
         "{scheme}://{host}/cgi-bin/configManager.cgi?action=setConfig&{}",
@@ -275,12 +319,14 @@ pub async fn sambar_burtgelgui(ip: &str, plate: &str) -> anyhow::Result<String> 
     let (scheme, host) = crate::probe::scheme_and_host(ip, http_port);
 
     let params = [
-        "TrafficLatticeScreen[0].StatusChangeTime=10".to_string(),
+        "TrafficLatticeScreen[0].StatusChangeTime=1".to_string(),
         format!("TrafficLatticeScreen[0].Normal.Contents.[0]=str({plate})"),
         "TrafficLatticeScreen[0].Normal.Contents.[1]=str(Бүртгэлгүй машин)".to_string(),
         format!("TrafficLatticeScreen[0].Normal.Contents.[2]=str({org_name})"),
         "TrafficLatticeScreen[0].Normal.Contents.[3]=SysTime".to_string(),
     ];
+
+    let params = khoyr_tulevt(&params);
 
     let url = format!(
         "{scheme}://{host}/cgi-bin/configManager.cgi?action=setConfig&{}",
@@ -319,19 +365,25 @@ pub async fn sambar_registered(ip: &str, plate: &str, turul: &str) -> anyhow::Re
     let http_port = crate::probe::resolve_port(ip, preferred_port).await;
     let (scheme, host) = crate::probe::scheme_and_host(ip, http_port);
 
+    // Төрөл нь мэдэгдэхгүй бол "Оршин суугч" гэж ТААХГҮЙ. Тааварласан
+    // төрөл нь самбар дээр буруу мэдээлэл болж, жишээ нь 862,000₮ төлсөн
+    // үйлчлүүлэгчийг үнэгүй оршин суугч мэт харуулж байв. Мэдэхгүй бол
+    // СӨХ-ийн нэрийг тавина — худал мэдээллээс дээр.
     let display_turul = if turul.trim().is_empty() {
-        "Оршин суугч"
+        org_name.as_str()
     } else {
         turul.trim()
     };
 
     let params = [
-        "TrafficLatticeScreen[0].StatusChangeTime=10".to_string(),
+        "TrafficLatticeScreen[0].StatusChangeTime=1".to_string(),
         format!("TrafficLatticeScreen[0].Normal.Contents.[0]=str({plate})"),
         format!("TrafficLatticeScreen[0].Normal.Contents.[1]=str({display_turul})"),
         format!("TrafficLatticeScreen[0].Normal.Contents.[2]=str({org_name})"),
         "TrafficLatticeScreen[0].Normal.Contents.[3]=SysTime".to_string(),
     ];
+
+    let params = khoyr_tulevt(&params);
 
     let url = format!(
         "{scheme}://{host}/cgi-bin/configManager.cgi?action=setConfig&{}",
@@ -369,28 +421,44 @@ pub async fn sambar_exit(ip: &str, plate: &str, turul: &str, dun: &str) -> anyho
     let http_port = crate::probe::resolve_port(ip, preferred_port).await;
     let (scheme, host) = crate::probe::scheme_and_host(ip, http_port);
 
-    let dun_t = format!("{}T", dun);
-    let line1 = if !turul.trim().is_empty() && turul != "Үйлчлүүлэгч" {
+    // Самбар 4 мөртэй тул дугаар / төрөл / дүн / цаг нь бүгд БАГТАНА —
+    // аль нэгийг нь нөгөөгөөр солих шаардлагагүй.
+    //
+    // Төрөл: ЯМАР Ч төрлийг шууд харуулна (Зочин, Үйлчлүүлэгч, Оршин суугч,
+    // СӨХ, Ажилтан гэх мэт). Өмнө нь "Үйлчлүүлэгч"-ийг дараад оронд нь дүнг
+    // тавьдаг байсан нь төрөл огт харагдахгүй болгодог байв.
+    let line1 = if turul.trim().is_empty() {
+        org_name.clone()
+    } else {
         turul.trim().to_string()
-    } else if dun != "0" && !dun.is_empty() {
-        dun_t.clone()
+    };
+
+    // Дүн: ТООГООР нь шалгана. Сервер "0.00" гэж илгээдэг бөгөөд үүнийг
+    // мөрөөр нь `dun != "0"` гэж харьцуулбал ТӨЛБӨРТЭЙ мэт ойлгогдож,
+    // самбарт "0.00T" гэж гарч байсан. Мөн `tulukhDun` байхгүй үед сервер
+    // `String(undefined)` → "undefined" гэсэн ТЕКСТ илгээдэг тул тоо болж
+    // хөрвөхгүй бүхнийг үнэгүй гэж үзнэ.
+    let tulbur: f64 = dun
+        .replace(',', "")
+        .trim()
+        .parse()
+        .unwrap_or(0.0);
+
+    let line2 = if tulbur > 0.0 {
+        format!("{}T", dun.trim())
     } else {
         "Үнэгүй".to_string()
     };
 
-    let line2 = if line1 != dun_t && dun != "0" && !dun.is_empty() {
-        dun_t
-    } else {
-        org_name
-    };
-
     let params = [
-        "TrafficLatticeScreen[0].StatusChangeTime=10".to_string(),
+        "TrafficLatticeScreen[0].StatusChangeTime=1".to_string(),
         format!("TrafficLatticeScreen[0].Normal.Contents.[0]=str({plate})"),
         format!("TrafficLatticeScreen[0].Normal.Contents.[1]=str({line1})"),
         format!("TrafficLatticeScreen[0].Normal.Contents.[2]=str({line2})"),
         "TrafficLatticeScreen[0].Normal.Contents.[3]=SysTime".to_string(),
     ];
+
+    let params = khoyr_tulevt(&params);
 
     let url = format!(
         "{scheme}://{host}/cgi-bin/configManager.cgi?action=setConfig&{}",
@@ -475,6 +543,27 @@ async fn sambar_ognootoi(
         }
     }
 }
+/// NORMAL мөрүүдийг CARPASS руу ХУУЛНА.
+///
+/// Самбар нь хоёр ТӨЛӨВТЭЙ: Normal (сул зогсолт) ба CarPass (машин
+/// өнгөрөх). `StatusChangeTime=1` болсноор камер нэг секундын дараа
+/// CarPass төлөв рүү шилждэг — тэнд юу ч бичигдээгүй бол дэлгэц ХООСОН
+/// болно. Өмнө нь завсар 10 секунд байхад Normal удаан харагддаг тул энэ
+/// нь анзаарагддаггүй байв.
+///
+/// CarPass-ийн мөрийг ДУТУУ бичиж болохгүй: зөвхөн [0]~[2]-ыг бичихэд
+/// төхөөрөмж HTTP 200 буцаасан ч биед нь `Error` гэж хариулдаг. Normal
+/// дээрх 4 мөрийг бүтнээр нь хуулж байгаа учир ийм асуудал гарахгүй.
+fn khoyr_tulevt(params: &[String]) -> Vec<String> {
+    let mut bukh: Vec<String> = params.to_vec();
+    for mur in params {
+        if mur.contains(".Normal.") {
+            bukh.push(mur.replace(".Normal.", ".CarPass."));
+        }
+    }
+    bukh
+}
+
 async fn send_sambar_request(url: &str, password: &str) -> anyhow::Result<String> {
     let client = reqwest::Client::builder()
     .timeout(std::time::Duration::from_secs(5))
@@ -511,9 +600,15 @@ async fn send_sambar_request(url: &str, password: &str) -> anyhow::Result<String
 
     info!("Final response status: {}", resp.status());
     let body = resp.text().await.unwrap_or_default();
+
+    // Камер нь БУРУУ бичилтэд ч HTTP 200 буцаадаг — алдааг зөвхөн биеэр нь
+    // мэднэ. Үүнийг амжилт гэж үзвэл бичилт бүтээгүйг анзаарахад хэцүү.
+    if body.trim_start().starts_with("Error") {
+        anyhow::bail!("камер татгалзлаа: {}", body.trim());
+    }
+
     Ok(body)
 }
-
 async fn restart_connections() -> impl IntoResponse {
     info!("Manual connection restart requested via API");
     tokio::task::spawn_blocking(|| {

@@ -175,9 +175,25 @@ fn handle_execute_open(payload: Payload, socket: RawClient, tag: &str) {
         Err(e) => error!("🚪 [{tag} GATE] Result: ip={ip} plate={plate_log} success=false error={e}"),
     }
 
-    // Хаалга нээгдсэн бол самбарт дугаарыг гаргана — орох, гарах хоёулаа.
-    if result.is_ok() && !plate.is_empty() {
-        let turul = v.get("turul").and_then(|t| t.as_str()).unwrap_or("Оршин суугч").to_string();
+    // ЗӨВХӨН ОРЦЫН самбарт бичнэ.
+    //
+    // `execute-open` нь гарах үед ч ирдэг. Гарцын самбарыг `sambar-show`
+    // (→ `sambar_exit`) аль хэдийн бичдэг бөгөөд тэнд төрөл нь хадгалагдсан
+    // `uilchluulegch.turul`-ээс, ДҮН нь хамт ирдэг — найдвартай. Харин
+    // `execute-open`-ий төрөл нь урилгын хайлтаас гардаг бөгөөд гарах үед
+    // урилга нь идэвхтэй (tuluv 0/1) байхаа больсон байж болно. Хоёулаа
+    // нэг самбар руу бичвэл уралдаж, сүүлд нь буусан нь ялна — зочин
+    // "Үйлчлүүлэгч" болж харагдах эрсдэлтэй. Иймд гарцад бичихгүй.
+    let orts = crate::camera_manager::CAMERA_MANAGER
+        .get()
+        .map(|m| m.is_entrance(&ip))
+        .unwrap_or(true);
+
+    if result.is_ok() && !plate.is_empty() && orts {
+        // Сервер төрөл илгээгээгүй бол ОРШИН СУУГЧ гэж ТААХГҮЙ — тэр нь
+        // төлбөртэй үйлчлүүлэгчийг үнэгүй оршин суугч мэт харуулдаг байв.
+        // Хоосон үлдээвэл доорх бичигч нь СӨХ-ийн нэрийг тавина.
+        let turul = v.get("turul").and_then(|t| t.as_str()).unwrap_or_default().to_string();
         let ip_s = ip.clone();
         let plate_s = plate.clone();
         let turul_s = turul.clone();
