@@ -61,6 +61,7 @@ pub fn start_socket_bridge(vps_url: String, target: BarilgaTarget) {
             let tag_disc     = tag.clone();
             let tag_err      = tag.clone();
             let tag_urg_on   = tag.clone();
+            let tag_samb     = tag.clone();
             let tag_urg_off  = tag.clone();
 
             let socket_res = ClientBuilder::new(&vps_url)
@@ -81,6 +82,9 @@ pub fn start_socket_bridge(vps_url: String, target: BarilgaTarget) {
                 })
                 .on("error", move |err, _| {
                     error!("❌ [{tag_err}] Socket error: {err:#?}");
+                })
+                .on("sambar-show", move |payload: Payload, _socket: RawClient| {
+                    handle_sambar_show(payload, &tag_samb);
                 })
                 .on("execute-open", move |payload: Payload, socket: RawClient| {
                     handle_execute_open(payload, socket, &tag_open);
@@ -171,6 +175,54 @@ fn handle_execute_open(payload: Payload, socket: RawClient, tag: &str) {
         Err(e) => error!("🚪 [{tag} GATE] Result: ip={ip} plate={plate_log} success=false error={e}"),
     }
 
+    // Хаалга нээгдсэн бол самбарт дугаарыг гаргана — орох, гарах хоёулаа.
+    // Байрлал нь л өөр (доор).
+    if result.is_ok() && !plate.is_empty() {
+        let orokh = CAMERA_MANAGER
+            .get()
+            .map(|m| m.is_entrance(&ip))
+            .unwrap_or(false);
+
+        // Гарах камер дээр ДҮН байхгүй (`execute-open` нь зөвхөн ip/plate
+        // авчирдаг) тул дүнгийн мөрийг ХУДАЛ "0T"-ээр дүүргэхгүй — дугаар
+        // ба байгууллагын нэрийг л гаргана. Дүн ирдэг болбол орохтой ижил
+        // `sambar_bichye` рүү шилжүүлнэ.
+        {
+            let ip_s = ip.clone();
+            let plate_s = plate.clone();
+            let tag_s = tag.to_string();
+            let baig = CAMERA_MANAGER
+                .get()
+                .map(|m| m.org_name().to_string())
+                .unwrap_or_default();
+            // Socket-ийн callback нь синхрон, tokio-гийн гадна ажилладаг тул
+            // богино настай runtime үүсгэж, байгаа async замыг дахин ашиглана.
+            std::thread::spawn(move || {
+                let rt = match tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                {
+                    Ok(rt) => rt,
+                    Err(e) => {
+                        error!("❌ [{tag_s} SAMBAR] runtime үүсгэж чадсангүй: {e}");
+                        return;
+                    }
+                };
+                let khariu = if orokh {
+                    rt.block_on(crate::api::sambar_bichye(&ip_s, &plate_s, "0"))
+                } else {
+                    rt.block_on(crate::api::sambar_medegdel(&ip_s, &plate_s, &baig, ""))
+                };
+                match khariu {
+                    Ok(body) => info!(
+                        "🔆 [{tag_s} SAMBAR] ip={ip_s} plate={plate_s} хариу={body}"
+                    ),
+                    Err(e) => error!("❌ [{tag_s} SAMBAR] ip={ip_s} aldaa={e}"),
+                }
+            });
+        }
+    }
+
     if !command_id.is_empty() {
         let result_payload = serde_json::json!({
             "commandId": command_id,
@@ -180,6 +232,66 @@ fn handle_execute_open(payload: Payload, socket: RawClient, tag: &str) {
         });
         let _ = socket.emit("execute-open-result", result_payload);
     }
+}
+
+/// Сервер тооцоолсон төлбөрийн дүнг гарцын самбарт гаргана.
+///
+/// Дүн нь зөвхөн серверт мэдэгддэг (зочин, гэрээт гэх мэт төрөл бүрийн
+/// тооцоо тэнд хийгддэг) тул ажилтан нь зүгээр л дамжуулагч: ирсэн
+/// дугаар, дүнг нь хэвээр нь бичнэ.
+fn handle_sambar_show(payload: Payload, tag: &str) {
+    let json_str = match payload {
+        Payload::String(s) => s,
+        Payload::Binary(b) => String::from_utf8_lossy(&b).to_string(),
+    };
+
+    let v: serde_json::Value = match serde_json::from_str(&json_str) {
+        Ok(v) => v,
+        Err(e) => {
+            error!("❌ [{tag} SAMBAR] JSON задлахад алдаа: {json_str} ({e})");
+            return;
+        }
+    };
+
+    let ip = v.get("ip").and_then(|i| i.as_str()).unwrap_or_default().to_string();
+    let plate = v.get("plate").and_then(|p| p.as_str()).unwrap_or_default().to_string();
+    let dun = v.get("dun").and_then(|d| d.as_str()).unwrap_or("0").to_string();
+    let turul = v.get("turul").and_then(|t| t.as_str()).unwrap_or_default().to_string();
+
+    if ip.is_empty() {
+        error!("❌ [{tag} SAMBAR] 'ip' талбар дутуу байна");
+        return;
+    }
+
+    info!("🔆 [{tag} SAMBAR] Received: ip={ip} plate={plate} turul={turul} dun={dun}");
+
+    let tag_s = tag.to_string();
+    std::thread::spawn(move || {
+        let rt = match tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        {
+            Ok(rt) => rt,
+            Err(e) => {
+                error!("❌ [{tag_s} SAMBAR] runtime үүсгэж чадсангүй: {e}");
+                return;
+            }
+        };
+        // Дөрвөн мөр: дугаар / төрөл / дүн / байгууллага.
+        let dun_t = format!("{dun}T");
+        let baig = CAMERA_MANAGER
+            .get()
+            .map(|m| m.org_name().to_string())
+            .unwrap_or_default();
+        let murnuud: Vec<&str> = vec![&plate, &turul, &dun_t, &baig];
+
+        match rt.block_on(crate::api::sambar_murnuud(&ip, &murnuud)) {
+            Ok(body) => info!(
+                "🔆 [{tag_s} SAMBAR] бичигдлээ turul={turul} dun={dun} хариу={body}"
+            ),
+            Err(e) => error!("❌ [{tag_s} SAMBAR] ip={ip} aldaa={e}"),
+        }
+    });
 }
 
 /// Урсгалыг шаардлагаар асаах/зогсоох дохио.

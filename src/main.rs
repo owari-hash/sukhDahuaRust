@@ -129,7 +129,6 @@ fn run_service(_args: Vec<OsString>) -> anyhow::Result<()> {
     Ok(())
 }
 
-// â”€â”€â”€ Main application logic â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 async fn run_app(cfg: Config) -> anyhow::Result<()> {
     info!("=== Dahua Parking Service {VERSION} starting ===");
@@ -142,7 +141,7 @@ async fn run_app(cfg: Config) -> anyhow::Result<()> {
     }
 
     if cfg.sambar_only {
-        info!("sambar_only mode â€” skipping SDK/camera, running API only");
+        info!("sambar_only mode skipping SDK/camera, running API only");
 
         // Still need CameraManager for password/port/is_entrance lookups in sambar endpoints
         let (plate_tx, _plate_rx) = mpsc::channel::<camera_manager::PlateEvent>(1);

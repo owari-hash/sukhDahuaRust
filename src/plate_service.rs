@@ -77,7 +77,29 @@ impl PlateService {
 
         let status = resp.status();
         let text   = resp.text().await.unwrap_or_default();
-        println!("Server raw response ({status}): {text}");
+        // println! нь fern-ээр баригддаггүй тул Windows үйлчилгээ болж
+        // ажиллахад энэ мөр ХАА Ч харагддаггүй байв.
+        log::info!("Server raw response ({status}): {text}");
+
+        // Сервер 200 буцаасан ч `aldaa` талбартай бол машиныг ОРУУЛААГҮЙ
+        // гэсэн үг: хаалга нээгдэхгүй тул самбар өмнөх машины дугаар дээрээ
+        // хөшиж үлддэг байв. Жолоочид шалтгааныг нь харуулна — серверийн
+        // ӨӨРИЙНХ нь үгээр, энд орчуулга зохиохгүй.
+        if status.is_success() {
+            if let Some(shaltgaan) = serde_json::from_str::<serde_json::Value>(&text)
+                .ok()
+                .and_then(|v| v.get("aldaa").and_then(|a| a.as_str()).map(String::from))
+            {
+                let ip = payload.CAMERA_IP.to_string();
+                let dugaar = payload.mashiniiDugaar.to_string();
+                warn!("PLATE DENIED | plate={dugaar} camera={ip} shaltgaan={shaltgaan}");
+                if let Err(e) =
+                    crate::api::sambar_medegdel(&ip, &dugaar, &shaltgaan, "").await
+                {
+                    error!("❌ [SAMBAR] татгалзлыг бичиж чадсангүй: {e}");
+                }
+            }
+        }
 
         if !status.is_success() {
             anyhow::bail!("Server returned {status}: {text}");

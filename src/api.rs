@@ -5,7 +5,7 @@ use axum::{
     response::IntoResponse,
     http::{StatusCode, Method, HeaderValue},
 };
-use log::info;
+use log::{info, error, debug};
 use tokio::net::TcpListener;
 use tower_http::cors::{CorsLayer, Any};
 use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
@@ -37,6 +37,7 @@ pub async fn run_api_server(port: u16) {
         .route("/api/neeye/:ip",             get(neeye))
         .route("/api/sambar/:ip/:text/:dun", get(sambar))
         .route("/api/sambarOgnootoi/:ip/:text/:dun/:start/:end",    get(sambar_ognootoi))
+        .route("/api/sambarConfig/:ip",      get(sambar_config))
         .route("/api/restartConnections",    post(restart_connections))
         .route("/api/health",                get(health))
         .fallback(handler_404)
@@ -51,11 +52,11 @@ pub async fn run_api_server(port: u16) {
 
 /// Open barrier gate — called by frontend after server approves plate
 async fn neeye(Path(ip): Path<String>) -> impl IntoResponse {
-    println!("======= NEEYE HIT =======");
-    println!("neeye called for ip: {ip}");
+    info!("======= NEEYE HIT =======");
+    info!("neeye called for ip: {ip}");
 
     if CAMERA_MANAGER.get().and_then(|m| m.handle_for_ip(&ip)).is_none() {
-        println!("neeye Aldaa: IP {ip} not found");
+        error!("neeye Aldaa: IP {ip} not found");
         return (StatusCode::INTERNAL_SERVER_ERROR, "aldaa".to_string());
     }
 
@@ -70,36 +71,173 @@ async fn neeye(Path(ip): Path<String>) -> impl IntoResponse {
     match result {
         Ok(()) => (StatusCode::OK, "Amjilttai".to_string()),
         Err(e) => {
-            println!("neeye: Хаалга нээгдсэнгүй ({ip}): {e}");
+            error!("neeye: Хаалга нээгдсэнгүй ({ip}): {e}");
             (StatusCode::INTERNAL_SERVER_ERROR, format!("Хаалга нээгдсэнгүй: {e}"))
+        }
+    }
+}
+
+/// Самбарын ОДООГИЙН тохиргоог камераас уншина (бичихгүй).
+///
+/// Яагаад хэрэгтэй вэ: камерын вэб дээр мөр бүр нь Type (Custom/Date/
+/// System Time), Contents, Text Color, Text Effect, Effect гэсэн ТУСДАА
+/// талбартай. Доорх бичих код нь зөвхөн `Contents.[i]`-г дарж бичдэг тул
+/// төхөөрөмжийн жинхэнэ түлхүүрийн нэртэй таарч байгаа эсэх нь тодорхойгүй.
+/// Энэ төгсгөлөг нь `action=getConfig`-оор ЯГ ямар түлхүүр байгааг буцаана —
+/// дараа нь түүнд нь тааруулж бичнэ.
+async fn sambar_config(Path(ip): Path<String>) -> impl IntoResponse {
+    info!("sambarConfig called for ip: {ip}");
+
+    let (password, preferred_port) = CAMERA_MANAGER
+        .get()
+        .map(|m| (m.password_for_ip(&ip), m.http_port_for_ip(&ip).unwrap_or(80)))
+        .unwrap_or_else(|| ("admin123".to_string(), 80));
+
+    let http_port = crate::probe::resolve_port(&ip, preferred_port).await;
+    let (scheme, host) = crate::probe::scheme_and_host(&ip, http_port);
+
+    let url = format!(
+        "{scheme}://{host}/cgi-bin/configManager.cgi?action=getConfig&name=TrafficLatticeScreen"
+    );
+    info!("[SAMBAR_CONFIG] URL: {url}");
+
+    match send_sambar_request(&url, &password).await {
+        Ok(body) => {
+            info!("sambarConfig response:\n{body}");
+            (StatusCode::OK, body)
+        }
+        Err(e) => {
+            error!("sambarConfig Aldaa: {e}");
+            crate::probe::invalidate(&ip);
+            (StatusCode::INTERNAL_SERVER_ERROR, format!("aldaa: {e}"))
+        }
+    }
+}
+
+/// Самбарын NORMAL мөрүүдийг өгсөн дарааллаар нь бичнэ (CarPass-ийг
+/// ХӨНДӨХГҮЙ). Камерын дэлгэц 4 мөртэй — өгсөн хэмжээгээр нь бичих тул
+/// дутуу өгвөл үлдсэн мөр нь хэвээр үлдэнэ.
+pub async fn sambar_murnuud(ip: &str, murnuud: &[&str]) -> anyhow::Result<String> {
+    let (password, preferred_port) = CAMERA_MANAGER
+        .get()
+        .map(|m| (m.password_for_ip(ip), m.http_port_for_ip(ip).unwrap_or(80)))
+        .unwrap_or_else(|| ("admin123".to_string(), 80));
+
+    let http_port = crate::probe::resolve_port(ip, preferred_port).await;
+    let (scheme, host) = crate::probe::scheme_and_host(ip, http_port);
+
+    let mut params = vec!["TrafficLatticeScreen[0].StatusChangeTime=10".to_string()];
+    for (i, mur) in murnuud.iter().enumerate().take(4) {
+        params.push(format!(
+            "TrafficLatticeScreen[0].Normal.Contents.[{i}]=str({mur})"
+        ));
+    }
+
+    let url = format!(
+        "{scheme}://{host}/cgi-bin/configManager.cgi?action=setConfig&{}",
+        params.join("&")
+    );
+    info!("[SAMBAR_MURNUUD] URL: {url}");
+
+    match send_sambar_request(&url, &password).await {
+        Ok(body) => {
+            info!("sambarMurnuud response: {body}");
+            Ok(body)
+        }
+        Err(e) => {
+            error!("sambarMurnuud Aldaa: {e}");
+            crate::probe::invalidate(ip);
+            Err(e)
+        }
+    }
+}
+
+/// Самбарын NORMAL гурван мөрийг шууд бичнэ (CarPass-ийг ХӨНДӨХГҮЙ).
+///
+/// `sambar_bichye` нь орох/гарах байрлалыг өөрөө шийддэг бол энэ нь
+/// дуудагчийн өгсөн мөрүүдийг яг тэр хэвээр нь тавина — татгалзсан
+/// мэдэгдэл, дүнгүй гарах зэрэгт хэрэгтэй.
+pub async fn sambar_medegdel(
+    ip: &str,
+    mur0: &str,
+    mur1: &str,
+    mur2: &str,
+) -> anyhow::Result<String> {
+    let (password, preferred_port) = CAMERA_MANAGER
+        .get()
+        .map(|m| (m.password_for_ip(ip), m.http_port_for_ip(ip).unwrap_or(80)))
+        .unwrap_or_else(|| ("admin123".to_string(), 80));
+
+    let http_port = crate::probe::resolve_port(ip, preferred_port).await;
+    let (scheme, host) = crate::probe::scheme_and_host(ip, http_port);
+
+    let params = [
+        "TrafficLatticeScreen[0].StatusChangeTime=10".to_string(),
+        format!("TrafficLatticeScreen[0].Normal.Contents.[0]=str({mur0})"),
+        format!("TrafficLatticeScreen[0].Normal.Contents.[1]=str({mur1})"),
+        format!("TrafficLatticeScreen[0].Normal.Contents.[2]=str({mur2})"),
+    ];
+
+    let url = format!(
+        "{scheme}://{host}/cgi-bin/configManager.cgi?action=setConfig&{}",
+        params.join("&")
+    );
+    info!("[SAMBAR_MEDEGDEL] URL: {url}");
+
+    match send_sambar_request(&url, &password).await {
+        Ok(body) => {
+            info!("sambarMedegdel response: {body}");
+            Ok(body)
+        }
+        Err(e) => {
+            error!("sambarMedegdel Aldaa: {e}");
+            crate::probe::invalidate(ip);
+            Err(e)
         }
     }
 }
 
 /// LED screen display — HTTP configManager.cgi
 async fn sambar(Path((ip, text, dun)): Path<(String, String, String)>) -> impl IntoResponse {
-    println!("sambar called for ip: {ip} text: {text} dun: {dun}");
+    info!("sambar called for ip: {ip} text: {text} dun: {dun}");
+    match sambar_bichye(&ip, &text, &dun).await {
+        Ok(_) => (StatusCode::OK, "Amjilttai".to_string()),
+        Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, "aldaa".to_string()),
+    }
+}
+
+/// Самбарт бичих ҮНДСЭН үйлдэл.
+///
+/// HTTP төгсгөлөг ба хаалга нээгдэх үйл явдал ХОЁУЛАА үүнийг дууддаг —
+/// ингэснээр мөрийн байрлал, нэвтрэлт, порт хайлт нэг газар байна.
+pub async fn sambar_bichye(ip: &str, text: &str, dun: &str) -> anyhow::Result<String> {
 
     let (password, is_entrance, org_name, company_name, preferred_port) = CAMERA_MANAGER
         .get()
         .map(|m| (
-            m.password_for_ip(&ip),
-            m.is_entrance(&ip),
+            m.password_for_ip(ip),
+            m.is_entrance(ip),
             m.org_name().to_string(),
             m.company_name().to_string(),
-            m.http_port_for_ip(&ip).unwrap_or(80),
+            m.http_port_for_ip(ip).unwrap_or(80),
         ))
         .unwrap_or(("admin123".to_string(), false, "Найрамдал".to_string(), "Найрамдал".to_string(), 80));
 
-    let http_port = crate::probe::resolve_port(&ip, preferred_port).await;
-    let (scheme, host) = crate::probe::scheme_and_host(&ip, http_port);
+    let http_port = crate::probe::resolve_port(ip, preferred_port).await;
+    let (scheme, host) = crate::probe::scheme_and_host(ip, http_port);
 
     let dun_t = format!("{}T", dun);
     let line1 = if is_entrance { org_name.clone() } else { dun_t.clone() };
     let line2 = if is_entrance { "Зөврөөшөлтэй машин".to_string() } else { org_name.clone() };
     let carpass_0 = if is_entrance { company_name.clone() } else { "".to_string() };
     let params = [
-        "TrafficLatticeScreen[0].StatusChangeTime=1".to_string(),
+        // Төлөв солигдох ЗАВСАР (секунд). Dahua-гийн SDK толгойд
+        // `nStatusChangeTime` нь 10 ~ 60 гэж ЗААГДСАН
+        // (NET_CFG_TRAFFIC_LATTICE_SCREEN_INFO). Өмнө нь 1 гэж явуулдаг
+        // байсан нь хүрээнээс ГАДУУР — төхөөрөмж ийм утгыг хүлээж авахгүй
+        // бөгөөд Dahua нь нэг параметр буруу бол setConfig-ийг БҮХЭЛД нь
+        // няцаадаг тул бусад мөр ч бичигдэхгүй өнгөрөх эрсдэлтэй байв.
+        "TrafficLatticeScreen[0].StatusChangeTime=10".to_string(),
         format!("TrafficLatticeScreen[0].Normal.Contents.[0]=str({text})"),
         format!("TrafficLatticeScreen[0].Normal.Contents.[1]=str({line1})"),
         format!("TrafficLatticeScreen[0].Normal.Contents.[2]=str({line2})"),
@@ -112,17 +250,17 @@ async fn sambar(Path((ip, text, dun)): Path<(String, String, String)>) -> impl I
         params.join("&")
     );
 
-    println!("[SAMBAR] URL: {url}");
+    info!("[SAMBAR] URL: {url}");
 
     match send_sambar_request(&url, &password).await {
         Ok(body) => {
-            println!("sambar response: {body}");
-            (StatusCode::OK, "Amjilttai".to_string())
+            info!("sambar response: {body}");
+            Ok(body)
         }
         Err(e) => {
-            println!("sambar Aldaa: {e}");
-            crate::probe::invalidate(&ip);
-            (StatusCode::INTERNAL_SERVER_ERROR, "aldaa".to_string())
+            error!("sambar Aldaa: {e}");
+            crate::probe::invalidate(ip);
+            Err(e)
         }
     }
 }
@@ -130,7 +268,7 @@ async fn sambar(Path((ip, text, dun)): Path<(String, String, String)>) -> impl I
 async fn sambar_ognootoi(
     Path((ip, text, dun, start, end)): Path<(String, String, String, String, String)>,
 ) -> impl IntoResponse {
-    println!("sambarOgnootoi called for ip: {ip} text: {text} dun: {dun} start: {start} end: {end}");
+    info!("sambarOgnootoi called for ip: {ip} text: {text} dun: {dun} start: {start} end: {end}");
 
     let (password, preferred_port) = CAMERA_MANAGER
         .get()
@@ -143,6 +281,12 @@ async fn sambar_ognootoi(
     let dun_t = format!("{}T", dun);
 
     let params = [
+        // Төлөв солигдох ЗАВСАР (секунд). Dahua-гийн SDK толгойд
+        // `nStatusChangeTime` нь 10 ~ 60 гэж ЗААГДСАН
+        // (NET_CFG_TRAFFIC_LATTICE_SCREEN_INFO). Өмнө нь 1 гэж явуулдаг
+        // байсан нь хүрээнээс ГАДУУР — төхөөрөмж ийм утгыг хүлээж авахгүй
+        // бөгөөд Dahua нь нэг параметр буруу бол setConfig-ийг БҮХЭЛД нь
+        // няцаадаг тул бусад мөр ч бичигдэхгүй өнгөрөх эрсдэлтэй байв.
         "TrafficLatticeScreen[0].StatusChangeTime=1".to_string(),
         format!("TrafficLatticeScreen[0].Normal.Contents.[0]=str({text})"),
         format!("TrafficLatticeScreen[0].Normal.Contents.[1]=str({dun_t})"),
@@ -159,15 +303,15 @@ async fn sambar_ognootoi(
         params.join("&")
     );
 
-    println!("[SAMBAR_OGNOOTOI] URL: {url}");
+    info!("[SAMBAR_OGNOOTOI] URL: {url}");
 
     match send_sambar_request(&url, &password).await {
         Ok(body) => {
-            println!("sambarOgnootoi response: {body}");
+            info!("sambarOgnootoi response: {body}");
             (StatusCode::OK, "Amjilttai".to_string())
         }
         Err(e) => {
-            println!("sambarOgnootoi Aldaa: {e}");
+            error!("sambarOgnootoi Aldaa: {e}");
             crate::probe::invalidate(&ip);
             (StatusCode::INTERNAL_SERVER_ERROR, "aldaa".to_string())
         }
@@ -180,7 +324,7 @@ async fn send_sambar_request(url: &str, password: &str) -> anyhow::Result<String
     .build()?;
 
     let first = client.get(url).send().await?;
-    println!("First response status: {}", first.status());
+    info!("First response status: {}", first.status());
 
     let resp = if first.status() == reqwest::StatusCode::UNAUTHORIZED {
         let auth_header = first.headers()
@@ -188,7 +332,7 @@ async fn send_sambar_request(url: &str, password: &str) -> anyhow::Result<String
             .and_then(|v| v.to_str().ok())
             .unwrap_or("")
             .to_string();
-        println!("WWW-Authenticate: {auth_header}");
+        debug!("WWW-Authenticate: {auth_header}");
 
         // Extract just the path+query for digest URI — use original url
        let uri = if let Some(pos) = url.find("/cgi-bin") {
@@ -200,14 +344,14 @@ async fn send_sambar_request(url: &str, password: &str) -> anyhow::Result<String
         let mut prompt = digest_auth::parse(&auth_header)?;
         let context = digest_auth::AuthContext::new("admin", password, uri);
         let answer = prompt.respond(&context)?.to_header_string();
-        println!("Auth answer: {answer}");
+        debug!("Auth answer: {answer}");
 
         client.get(url).header("Authorization", answer).send().await?
     } else {
         first
     };
 
-    println!("Final response status: {}", resp.status());
+    info!("Final response status: {}", resp.status());
     let body = resp.text().await.unwrap_or_default();
     Ok(body)
 }
@@ -229,6 +373,6 @@ async fn health() -> impl IntoResponse {
 }
 
 async fn handler_404(req: axum::extract::Request) -> impl IntoResponse {
-    println!("404 Not Found: {} {}", req.method(), req.uri());
+    error!("404 Not Found: {} {}", req.method(), req.uri());
     (StatusCode::NOT_FOUND, "Not Found")
 }
