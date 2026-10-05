@@ -1,0 +1,12 @@
+# Rust build artifacts
+/target
+
+# Log files
+*.log
+
+# Operating System files
+.DS_Store
+Thumbs.db
+
+# Офлойн багц (build-bundle.ps1)
+/dist

@@ -1,0 +1,38 @@
+﻿[server]
+url          = "https://amarhome.mn/api/zogsoolSdkService"
+token        = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6IjY5N2M3MGU4MWU3ODJkODExMGQzYjA2OCIsIm5lciI6ItCd0LDQudGA0LDQvNC00LDQuyIsImJhaWd1dWxsYWdpaW5JZCI6IjY5N2M3MGU4MWU3ODJkODExMGQzYjA2NCIsImlhdCI6MTc4MDYzNjQ1OX0._-vWaJCrLYKc4mKJCqL2NFslFq50sSRAuZPt_27vZVs"
+barilgiinId  = "697c71171e782d8110d3be4b"
+timeout_secs = 30
+retry_count  = 3
+
+[sdk]
+username                = "admin"
+heartbeat_interval_secs = 30
+connect_timeout_ms      = 5000
+max_connect_retries     = 5
+port                    = 37777
+org_name = "Найрамдал Хотхон"
+company_name = "ParkEase"
+
+[[cameras]]
+ip       = "192.168.1.100"
+password = "admin123"
+http_port = 443
+gate = "entrance"
+sambar_type = "sambar"
+# RTSP-ийн зам. Заагаагүй бол `cam/realmonitor?channel=1&subtype=1`.
+# Бүх Dahua марк тэгж үйлчилдэггүй — зарим нь `live`.
+# Буруу байвал сигналчлал 200 байгаад байж хар дэлгэц гарна.
+# root = "live"
+# НИЙТЛЭХ урсгалыг энэ өргөн рүү буулгаж H.264-аар кодчилно.
+# Камерын тохиргоо ХӨНДӨГДӨХГҮЙ — дугаар таних алгоритм үндсэн
+# урсгал дээр гүйсэн ч хэвээр байна.
+#
+# Зөвхөн substream байхгүй, үндсэн урсгал том үед хэрэглэ.
+# Заагаагүй бол дахин кодчилдоггүй (CPU бараг тэг).
+# urgun = 1280
+
+# Multiple buildings supported for WebRTC stream sharing:
+[[barilga]]
+barilgiinId = "6a97bbebd2d69c94c9e9d915"
+ner = "Барилга 2"
