@@ -168,12 +168,13 @@ pub async fn sambar_murnuud(ip: &str, murnuud: &[&str]) -> anyhow::Result<String
     let http_port = crate::probe::resolve_port(ip, preferred_port).await;
     let (scheme, host) = crate::probe::scheme_and_host(ip, http_port);
 
-    let mut params = vec!["TrafficLatticeScreen[0].StatusChangeTime=1".to_string()];
+    let mut params = vec!["TrafficLatticeScreen[0].StatusChangeTime=8".to_string()];
     for (i, mur) in murnuud.iter().enumerate().take(4) {
         params.push(format!(
             "TrafficLatticeScreen[0].Normal.Contents.[{i}]=str({mur})"
         ));
     }
+    let params = khoyr_tulevt(&params);
 
     let url = format!(
         "{scheme}://{host}/cgi-bin/configManager.cgi?action=setConfig&{}",
@@ -214,11 +215,12 @@ pub async fn sambar_medegdel(
     let (scheme, host) = crate::probe::scheme_and_host(ip, http_port);
 
     let params = [
-        "TrafficLatticeScreen[0].StatusChangeTime=1".to_string(),
+        "TrafficLatticeScreen[0].StatusChangeTime=8".to_string(),
         format!("TrafficLatticeScreen[0].Normal.Contents.[0]=str({mur0})"),
         format!("TrafficLatticeScreen[0].Normal.Contents.[1]=str({mur1})"),
         format!("TrafficLatticeScreen[0].Normal.Contents.[2]=str({mur2})"),
     ];
+    let params = khoyr_tulevt(&params);
 
     let url = format!(
         "{scheme}://{host}/cgi-bin/configManager.cgi?action=setConfig&{}",
@@ -319,7 +321,7 @@ pub async fn sambar_burtgelgui(ip: &str, plate: &str) -> anyhow::Result<String> 
     let (scheme, host) = crate::probe::scheme_and_host(ip, http_port);
 
     let params = [
-        "TrafficLatticeScreen[0].StatusChangeTime=1".to_string(),
+        "TrafficLatticeScreen[0].StatusChangeTime=8".to_string(),
         format!("TrafficLatticeScreen[0].Normal.Contents.[0]=str({plate})"),
         "TrafficLatticeScreen[0].Normal.Contents.[1]=str(Бүртгэлгүй машин)".to_string(),
         format!("TrafficLatticeScreen[0].Normal.Contents.[2]=str({org_name})"),
@@ -376,7 +378,7 @@ pub async fn sambar_registered(ip: &str, plate: &str, turul: &str) -> anyhow::Re
     };
 
     let params = [
-        "TrafficLatticeScreen[0].StatusChangeTime=1".to_string(),
+        "TrafficLatticeScreen[0].StatusChangeTime=8".to_string(),
         format!("TrafficLatticeScreen[0].Normal.Contents.[0]=str({plate})"),
         format!("TrafficLatticeScreen[0].Normal.Contents.[1]=str({display_turul})"),
         format!("TrafficLatticeScreen[0].Normal.Contents.[2]=str({org_name})"),
@@ -451,7 +453,7 @@ pub async fn sambar_exit(ip: &str, plate: &str, turul: &str, dun: &str) -> anyho
     };
 
     let params = [
-        "TrafficLatticeScreen[0].StatusChangeTime=1".to_string(),
+        "TrafficLatticeScreen[0].StatusChangeTime=8".to_string(),
         format!("TrafficLatticeScreen[0].Normal.Contents.[0]=str({plate})"),
         format!("TrafficLatticeScreen[0].Normal.Contents.[1]=str({line1})"),
         format!("TrafficLatticeScreen[0].Normal.Contents.[2]=str({line2})"),
@@ -509,11 +511,8 @@ async fn sambar_ognootoi(
     let params = [
         // Төлөв солигдох ЗАВСАР (секунд). Dahua-гийн SDK толгойд
         // `nStatusChangeTime` нь 10 ~ 60 гэж ЗААГДСАН
-        // (NET_CFG_TRAFFIC_LATTICE_SCREEN_INFO). Өмнө нь 1 гэж явуулдаг
-        // байсан нь хүрээнээс ГАДУУР — төхөөрөмж ийм утгыг хүлээж авахгүй
-        // бөгөөд Dahua нь нэг параметр буруу бол setConfig-ийг БҮХЭЛД нь
-        // няцаадаг тул бусад мөр ч бичигдэхгүй өнгөрөх эрсдэлтэй байв.
-        "TrafficLatticeScreen[0].StatusChangeTime=1".to_string(),
+        // (NET_CFG_TRAFFIC_LATTICE_SCREEN_INFO).
+        "TrafficLatticeScreen[0].StatusChangeTime=8".to_string(),
         format!("TrafficLatticeScreen[0].Normal.Contents.[0]=str({text})"),
         format!("TrafficLatticeScreen[0].Normal.Contents.[1]=str({dun_t})"),
         format!("TrafficLatticeScreen[0].Normal.Contents.[2]=str({start})"),
@@ -546,10 +545,8 @@ async fn sambar_ognootoi(
 /// NORMAL мөрүүдийг CARPASS руу ХУУЛНА.
 ///
 /// Самбар нь хоёр ТӨЛӨВТЭЙ: Normal (сул зогсолт) ба CarPass (машин
-/// өнгөрөх). `StatusChangeTime=1` болсноор камер нэг секундын дараа
-/// CarPass төлөв рүү шилждэг — тэнд юу ч бичигдээгүй бол дэлгэц ХООСОН
-/// болно. Өмнө нь завсар 10 секунд байхад Normal удаан харагддаг тул энэ
-/// нь анзаарагддаггүй байв.
+/// өнгөрөх). Камер төлөв хооронд шилжихэд дэлгэц хоосон болохоос сэргийлж
+/// Normal дээрх мөрүүдийг CarPass руу давхар хуулна.
 ///
 /// CarPass-ийн мөрийг ДУТУУ бичиж болохгүй: зөвхөн [0]~[2]-ыг бичихэд
 /// төхөөрөмж HTTP 200 буцаасан ч биед нь `Error` гэж хариулдаг. Normal

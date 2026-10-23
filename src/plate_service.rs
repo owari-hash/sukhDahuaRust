@@ -96,12 +96,21 @@ impl PlateService {
                     error!("❌ [SAMBAR] бүртгэлгүй машин бичиж чадсангүй: {e}");
                 }
             } else {
-                let turul = json_val.as_ref()
-                    .and_then(|v| v.get("turul").and_then(|t| t.as_str()))
-                    .unwrap_or("Оршин суугч");
-                log::info!("PLATE APPROVED | plate={dugaar} camera={ip} turul={turul}");
-                if let Err(e) = crate::api::sambar_registered(&ip, &dugaar, turul).await {
-                    error!("❌ [SAMBAR] бүртгэлтэй машин бичиж чадсангүй: {e}");
+                let is_entrance = crate::camera_manager::CAMERA_MANAGER
+                    .get()
+                    .map(|m| m.is_entrance(&ip))
+                    .unwrap_or(true);
+
+                if is_entrance {
+                    let turul = json_val.as_ref()
+                        .and_then(|v| v.get("turul").and_then(|t| t.as_str()))
+                        .unwrap_or("");
+                    log::info!("PLATE APPROVED (ENTRANCE) | plate={dugaar} camera={ip} turul={turul}");
+                    if let Err(e) = crate::api::sambar_registered(&ip, &dugaar, turul).await {
+                        error!("❌ [SAMBAR] бүртгэлтэй машин бичиж чадсангүй: {e}");
+                    }
+                } else {
+                    log::info!("PLATE APPROVED (EXIT) | plate={dugaar} camera={ip} (гарцын самбарыг socket sambar-show дүнтэй нь бичнэ)");
                 }
             }
         }
