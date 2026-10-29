@@ -11,6 +11,32 @@ use tower_http::cors::{CorsLayer, Any};
 use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
 
 use crate::camera_manager::CAMERA_MANAGER;
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
+use once_cell::sync::Lazy;
+
+static SAMBAR_TIMERS: Lazy<Mutex<HashMap<String, u64>>> = Lazy::new(|| Mutex::new(HashMap::new()));
+static NEXT_TIMER_ID: AtomicU64 = AtomicU64::new(1);
+
+pub fn schedule_sambar_idle(ip: &str, seconds: u64) {
+    let timer_id = NEXT_TIMER_ID.fetch_add(1, Ordering::SeqCst);
+    if let Ok(mut timers) = SAMBAR_TIMERS.lock() {
+        timers.insert(ip.to_string(), timer_id);
+    }
+    let ip_clone = ip.to_string();
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_secs(seconds)).await;
+        let should_reset = if let Ok(timers) = SAMBAR_TIMERS.lock() {
+            timers.get(&ip_clone).copied() == Some(timer_id)
+        } else {
+            true
+        };
+        if should_reset {
+            let _ = sambar_idle(&ip_clone).await;
+        }
+    });
+}
 
 // Scheme unknown for the bare-IP origin (no TLS cert on an IP is common), so
 // both are allowed rather than guessing wrong and silently locking it out.
@@ -168,7 +194,7 @@ pub async fn sambar_murnuud(ip: &str, murnuud: &[&str]) -> anyhow::Result<String
     let http_port = crate::probe::resolve_port(ip, preferred_port).await;
     let (scheme, host) = crate::probe::scheme_and_host(ip, http_port);
 
-    let mut params = vec!["TrafficLatticeScreen[0].StatusChangeTime=8".to_string()];
+    let mut params = vec!["TrafficLatticeScreen[0].StatusChangeTime=1".to_string()];
     for (i, mur) in murnuud.iter().enumerate().take(4) {
         params.push(format!(
             "TrafficLatticeScreen[0].Normal.Contents.[{i}]=str({mur})"
@@ -215,7 +241,7 @@ pub async fn sambar_medegdel(
     let (scheme, host) = crate::probe::scheme_and_host(ip, http_port);
 
     let params = [
-        "TrafficLatticeScreen[0].StatusChangeTime=8".to_string(),
+        "TrafficLatticeScreen[0].StatusChangeTime=1".to_string(),
         format!("TrafficLatticeScreen[0].Normal.Contents.[0]=str({mur0})"),
         format!("TrafficLatticeScreen[0].Normal.Contents.[1]=str({mur1})"),
         format!("TrafficLatticeScreen[0].Normal.Contents.[2]=str({mur2})"),
@@ -321,7 +347,7 @@ pub async fn sambar_burtgelgui(ip: &str, plate: &str) -> anyhow::Result<String> 
     let (scheme, host) = crate::probe::scheme_and_host(ip, http_port);
 
     let params = [
-        "TrafficLatticeScreen[0].StatusChangeTime=8".to_string(),
+        "TrafficLatticeScreen[0].StatusChangeTime=1".to_string(),
         format!("TrafficLatticeScreen[0].Normal.Contents.[0]=str({plate})"),
         "TrafficLatticeScreen[0].Normal.Contents.[1]=str(Бүртгэлгүй машин)".to_string(),
         format!("TrafficLatticeScreen[0].Normal.Contents.[2]=str({org_name})"),
@@ -339,11 +365,7 @@ pub async fn sambar_burtgelgui(ip: &str, plate: &str) -> anyhow::Result<String> 
     let res = send_sambar_request(&url, &password).await;
 
     // 8 секундын дараа автоматаар idle горим руу буцна
-    let ip_clone = ip.to_string();
-    tokio::spawn(async move {
-        tokio::time::sleep(std::time::Duration::from_secs(8)).await;
-        let _ = sambar_idle(&ip_clone).await;
-    });
+    schedule_sambar_idle(ip, 8);
 
     res
 }
@@ -378,7 +400,7 @@ pub async fn sambar_registered(ip: &str, plate: &str, turul: &str) -> anyhow::Re
     };
 
     let params = [
-        "TrafficLatticeScreen[0].StatusChangeTime=8".to_string(),
+        "TrafficLatticeScreen[0].StatusChangeTime=1".to_string(),
         format!("TrafficLatticeScreen[0].Normal.Contents.[0]=str({plate})"),
         format!("TrafficLatticeScreen[0].Normal.Contents.[1]=str({display_turul})"),
         format!("TrafficLatticeScreen[0].Normal.Contents.[2]=str({org_name})"),
@@ -396,11 +418,7 @@ pub async fn sambar_registered(ip: &str, plate: &str, turul: &str) -> anyhow::Re
     let res = send_sambar_request(&url, &password).await;
 
     // 8 секундын дараа автоматаар idle горим руу буцна
-    let ip_clone = ip.to_string();
-    tokio::spawn(async move {
-        tokio::time::sleep(std::time::Duration::from_secs(8)).await;
-        let _ = sambar_idle(&ip_clone).await;
-    });
+    schedule_sambar_idle(ip, 8);
 
     res
 }
@@ -453,7 +471,7 @@ pub async fn sambar_exit(ip: &str, plate: &str, turul: &str, dun: &str) -> anyho
     };
 
     let params = [
-        "TrafficLatticeScreen[0].StatusChangeTime=8".to_string(),
+        "TrafficLatticeScreen[0].StatusChangeTime=1".to_string(),
         format!("TrafficLatticeScreen[0].Normal.Contents.[0]=str({plate})"),
         format!("TrafficLatticeScreen[0].Normal.Contents.[1]=str({line1})"),
         format!("TrafficLatticeScreen[0].Normal.Contents.[2]=str({line2})"),
@@ -471,11 +489,7 @@ pub async fn sambar_exit(ip: &str, plate: &str, turul: &str, dun: &str) -> anyho
     let res = send_sambar_request(&url, &password).await;
 
     // 8 секундын дараа автоматаар idle горим руу буцна
-    let ip_clone = ip.to_string();
-    tokio::spawn(async move {
-        tokio::time::sleep(std::time::Duration::from_secs(8)).await;
-        let _ = sambar_idle(&ip_clone).await;
-    });
+    schedule_sambar_idle(ip, 8);
 
     res
 }
@@ -512,7 +526,7 @@ async fn sambar_ognootoi(
         // Төлөв солигдох ЗАВСАР (секунд). Dahua-гийн SDK толгойд
         // `nStatusChangeTime` нь 10 ~ 60 гэж ЗААГДСАН
         // (NET_CFG_TRAFFIC_LATTICE_SCREEN_INFO).
-        "TrafficLatticeScreen[0].StatusChangeTime=8".to_string(),
+        "TrafficLatticeScreen[0].StatusChangeTime=1".to_string(),
         format!("TrafficLatticeScreen[0].Normal.Contents.[0]=str({text})"),
         format!("TrafficLatticeScreen[0].Normal.Contents.[1]=str({dun_t})"),
         format!("TrafficLatticeScreen[0].Normal.Contents.[2]=str({start})"),
