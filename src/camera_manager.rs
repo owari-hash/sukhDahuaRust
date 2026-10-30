@@ -314,21 +314,26 @@ impl CameraManager {
             None => { warn!("open_gate: IP {ip} handle Ð¾Ð»Ð´ÑÐ¾Ð½Ð³Ò¯Ð¹"); return Err("no_handle".to_string()); }
         };
 
+        let t0 = Instant::now();
         let mut strobe = NET_CTRL_OPEN_STROBE::default();
         strobe.nChannelId = 0;
+        if let Some(p) = plate.filter(|p| !p.is_empty()) {
+            fill_ansi(&mut strobe.szPlateNumber, p);
+        }
 
         let ret = unsafe {
             (sdk.control_device)(
                 handle,
                 EM_CTRL_OPEN_STROBE,
                 &mut strobe as *mut NET_CTRL_OPEN_STROBE as *mut c_void,
-                5000,
+                2000,
             )
         };
         if ret != 0 {
             if let Ok(mut map) = LAST_OPEN.lock() {
                 map.insert(ip.to_string(), Instant::now());
             }
+            log::info!("⚡ GATE OPEN SUCCESS | ip={ip} plate={:?} took {:?}", plate, t0.elapsed());
             return Ok(());
         }
 
@@ -348,18 +353,22 @@ impl CameraManager {
 
         let mut strobe2 = NET_CTRL_OPEN_STROBE::default();
         strobe2.nChannelId = 0;
+        if let Some(p) = plate.filter(|p| !p.is_empty()) {
+            fill_ansi(&mut strobe2.szPlateNumber, p);
+        }
         let ret2 = unsafe {
             (sdk.control_device)(
                 new_handle,
                 EM_CTRL_OPEN_STROBE,
                 &mut strobe2 as *mut NET_CTRL_OPEN_STROBE as *mut c_void,
-                5000,
+                2000,
             )
         };
         if ret2 != 0 {
             if let Ok(mut map) = LAST_OPEN.lock() {
                 map.insert(ip.to_string(), Instant::now());
             }
+            log::info!("⚡ GATE OPEN SUCCESS (retry) | ip={ip} plate={:?} took {:?}", plate, t0.elapsed());
             return Ok(());
         }
 
