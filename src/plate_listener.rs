@@ -22,7 +22,7 @@ pub async fn run_plate_listener(ip: String, password: String, preferred_port: u1
 
     loop {
         if consecutive_failures > 0 {
-            let delay_secs = std::cmp::min(3 * 2u64.pow(consecutive_failures.saturating_sub(1).min(4)), 60);
+            let delay_secs = std::cmp::min(2 * (consecutive_failures as u64).min(5), 10).max(2);
             println!("[{ip}] Дахин холбогдохоор {delay_secs}s хүлээж байна (оролдлого #{consecutive_failures})");
             tokio::time::sleep(std::time::Duration::from_secs(delay_secs)).await;
         }
@@ -56,8 +56,10 @@ async fn connect_and_read(
     consecutive_failures: &mut u32,
 ) -> anyhow::Result<()> {
     let client = reqwest::Client::builder()
-    .danger_accept_invalid_certs(true)
-    .build()?;
+        .danger_accept_invalid_certs(true)
+        .connect_timeout(std::time::Duration::from_secs(5))
+        .tcp_keepalive(std::time::Duration::from_secs(5))
+        .build()?;
 
     // First request — get WWW-Authenticate header
     let first = client.get(url).send().await?;
@@ -88,13 +90,20 @@ async fn connect_and_read(
 
     println!("[{ip}] Амжилттай холбогдлоо — plate event хүлээж байна...");
     *consecutive_failures = 0;
+    crate::api::schedule_sambar_idle(ip, 2);
 
     let mut stream = resp.bytes_stream();
     let mut buffer = String::new();
 
     use tokio_stream::StreamExt;
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk?;
+    loop {
+        let chunk = match tokio::time::timeout(std::time::Duration::from_secs(12), stream.next()).await {
+            Ok(Some(item)) => item?,
+            Ok(None) => break,
+            Err(_) => {
+                anyhow::bail!("Stream timed out (12s heartbeat silence, camera disconnected)");
+            }
+        };
         let text = String::from_utf8_lossy(&chunk);
         buffer.push_str(&text);
 

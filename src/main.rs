@@ -203,7 +203,7 @@ async fn run_app(cfg: Config) -> anyhow::Result<()> {
     // 6. SDK heartbeat â€” checks gate connection every 60s, reconnects if dead
     tokio::spawn(async move {
         loop {
-            tokio::time::sleep(Duration::from_secs(60)).await;
+            tokio::time::sleep(Duration::from_secs(10)).await;
             let _ = tokio::task::spawn_blocking(|| {
                 if let Some(mgr) = CAMERA_MANAGER.get() {
                     mgr.check_sdk_connections();

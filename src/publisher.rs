@@ -30,7 +30,7 @@ use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
 use crate::config::{CameraEntry, Config, PublishConfig};
 
 /// Дараалан унасан тохиолдолд хүлээх хугацааны дээд хязгаар.
-const MAX_BACKOFF_SECS: u64 = 30;
+const MAX_BACKOFF_SECS: u64 = 10;
 
 /// Нийтлэгчийг шатлан асаах зай (мс).
 ///
@@ -650,6 +650,9 @@ fn asaaya(
         // UDP дээр пакет алдагдвал зураг задардаг; TCP нь найдвартай.
         "-rtsp_transport".into(),
         "tcp".into(),
+        // 5s socket timeout (in microseconds) to prevent hanging when camera drops from LAN
+        "-timeout".into(),
+        "5000000".into(),
         // ТЭМДЭГЛЭЛ: оролтын буферийг хумих тугуудыг (`-fflags nobuffer`,
         // `-flags low_delay`, багасгасан `-analyzeduration`/`-probesize`)
         // ЗӨВИТГӨЖ ХАСАВ. `-c:v copy` үед ffmpeg дүрсийг тайлдаггүй тул тэд

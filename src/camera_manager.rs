@@ -1,6 +1,6 @@
 ﻿use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use std::ffi::c_void;
+use std::ffi::{c_void, c_char, c_int};
 use log::{warn, error};
 use once_cell::sync::OnceCell;
 use tokio::sync::mpsc;
@@ -42,6 +42,41 @@ pub struct CameraManager {
 unsafe impl Send for CameraManager {}
 unsafe impl Sync for CameraManager {}
 
+
+unsafe extern "system" fn on_disconnect(
+    login_id: HANDLE,
+    pch_dvr_ip: *const c_char,
+    port: c_int,
+    _dw_user: *mut c_void,
+) {
+    let ip = if !pch_dvr_ip.is_null() {
+        std::ffi::CStr::from_ptr(pch_dvr_ip).to_string_lossy().into_owned()
+    } else {
+        "unknown".to_string()
+    };
+    log::warn!("SDK CALLBACK | Камер холболт тасарлаа: ip={ip}, port={port}, handle={login_id:?}");
+    if let Some(mgr) = CAMERA_MANAGER.get() {
+        mgr.mark_disconnected(&ip);
+    }
+}
+
+unsafe extern "system" fn on_reconnect(
+    login_id: HANDLE,
+    pch_dvr_ip: *const c_char,
+    port: c_int,
+    _dw_user: *mut c_void,
+) {
+    let ip = if !pch_dvr_ip.is_null() {
+        std::ffi::CStr::from_ptr(pch_dvr_ip).to_string_lossy().into_owned()
+    } else {
+        "unknown".to_string()
+    };
+    log::info!("SDK CALLBACK | Камер NetSDK-ээр амжилттай дахин холбогдлоо: ip={ip}, port={port}, handle={login_id:?}");
+    if let Some(mgr) = CAMERA_MANAGER.get() {
+        mgr.update_handle(&ip, login_id);
+    }
+}
+
 impl CameraManager {
     pub fn new(cfg: &Config, plate_tx: mpsc::Sender<PlateEvent>) -> Self {
         Self {
@@ -51,6 +86,38 @@ impl CameraManager {
             sdk_cfg:        cfg.sdk.clone(),
             cam_cfg:        cfg.cameras.clone(),
             plate_tx,
+        }
+    }
+
+    pub fn mark_disconnected(&self, ip: &str) {
+        if let Ok(mut map) = self.handle_map.lock() {
+            map.remove(ip);
+        }
+        if let Ok(mut cams) = self.cameras.lock() {
+            if let Some(cam) = cams.iter_mut().find(|c| c.ip == ip) {
+                cam.handle = std::ptr::null_mut();
+            }
+        }
+    }
+
+    pub fn update_handle(&self, ip: &str, handle: HANDLE) {
+        if handle.is_null() {
+            return;
+        }
+        if let Ok(mut map) = self.handle_map.lock() {
+            map.insert(ip.to_string(), handle);
+        }
+        if let Ok(mut cams) = self.cameras.lock() {
+            if let Some(cam) = cams.iter_mut().find(|c| c.ip == ip) {
+                cam.handle = handle;
+            } else {
+                let password = self.password_for_ip(ip);
+                cams.push(CameraState {
+                    handle,
+                    ip: ip.to_string(),
+                    password,
+                });
+            }
         }
     }
 
@@ -117,18 +184,19 @@ impl CameraManager {
     pub fn startup_and_connect(&self) -> anyhow::Result<()> {
         let sdk = DahuaSdk::load()?;
 
-        log::info!("SDK | initialize Ñ…Ð¸Ð¹Ð¶ Ð±Ð°Ð¹Ð½Ð°...");
-        let ret = unsafe { (sdk.init_ex)(None, std::ptr::null_mut(), std::ptr::null_mut()) };
+        log::info!("SDK | initialize хийж байна...");
+        let ret = unsafe { (sdk.init_ex)(Some(on_disconnect), std::ptr::null_mut(), std::ptr::null_mut()) };
         if ret == 0 {
             anyhow::bail!("CLIENT_InitEx failed");
         }
-        log::info!("SDK | Ð°Ð¼Ð¶Ð¸Ð»Ñ‚Ñ‚Ð°Ð¹ Ð°ÑÐ»Ð°Ð°");
+        log::info!("SDK | амжилттай аслаа");
 
         unsafe {
             (sdk.set_connect_time)(
                 self.sdk_cfg.connect_timeout_ms as i32,
                 self.sdk_cfg.max_connect_retries as i32,
             );
+            (sdk.set_reconnect)(Some(on_reconnect), std::ptr::null_mut());
         }
 
         self.connect_all();
@@ -320,40 +388,22 @@ impl CameraManager {
         let _guard = self.reconnect_lock.lock().unwrap();
 
         let sdk = match DahuaSdk::load() { Ok(s) => s, Err(_) => return };
-        let password = {
-            self.cam_cfg.iter()
-                .find(|c| c.ip == ip)
-                .map(|c| c.password.clone())
-                .unwrap_or_default()
-        };
+        let password = self.password_for_ip(ip);
 
-        println!("Ð”Ð°Ñ…Ð¸Ð½ Ñ…Ð¾Ð»Ð±Ð¾Ð³Ð´Ð¾Ð¶ Ð±Ð°Ð¹Ð½Ð°: {ip}");
+        println!("Дахин холбогдож байна: {ip}");
 
-        // Ð¥ÑƒÑƒÑ‡Ð¸Ð½ handle logout Ñ…Ð¸Ð¹Ñ…
+        // Хуучин handle logout хийх
         if let Some(old_handle) = self.handle_for_ip(ip) {
             unsafe { let _ = (sdk.logout)(old_handle); }
         }
 
         let handle = Self::connect_with_retry_inner(sdk, ip, &password, &self.sdk_cfg);
         if !handle.is_null() {
-            // handle_map ÑˆÐ¸Ð½ÑÑ‡Ð»ÑÑ…
-            self.handle_map.lock().unwrap().insert(ip.to_string(), handle);
-
-            // cameras list ÑˆÐ¸Ð½ÑÑ‡Ð»ÑÑ…
-            let mut cams = self.cameras.lock().unwrap();
-            if let Some(cam) = cams.iter_mut().find(|c| c.ip == ip) {
-                cam.handle = handle;
-            } else {
-                cams.push(CameraState {
-                    handle,
-                    ip:       ip.to_string(),
-                    password: password.clone(),
-                });
-            }
-
-            println!("Ð”Ð°Ñ…Ð¸Ð½ Ð°Ð¼Ð¶Ð¸Ð»Ñ‚Ñ‚Ð°Ð¹ Ñ…Ð¾Ð»Ð±Ð¾Ð³Ð´Ð»Ð¾Ð¾: {ip}");
+            self.update_handle(ip, handle);
+            println!("Дахин амжилттай холбогдлоо: {ip}");
         } else {
-            error!("Ð”Ð°Ñ…Ð¸Ð½ Ñ…Ð¾Ð»Ð±Ð¾Ð³Ð´Ð¾Ñ…Ð¾Ð´ Ð°Ð¼Ð¶Ð¸Ð»Ñ‚Ð³Ò¯Ð¹: {ip}");
+            self.mark_disconnected(ip);
+            error!("Дахин холбогдоход амжилтгүй: {ip}");
         }
     }
 
@@ -366,25 +416,30 @@ impl CameraManager {
 
         for ip in ips_to_check {
             let handle = self.handle_for_ip(&ip);
-
-            if handle.map(|h| h.is_null()).unwrap_or(true) {
-                log::error!("SDK HEARTBEAT | no handle for {ip} â€” reconnecting");
-                self.reconnect_single(&ip);
-                continue;
-            }
+            let has_valid_handle = match handle {
+                Some(h) => !h.is_null(),
+                None => false,
+            };
 
             let addr = format!("{ip}:{sdk_port}");
             let reachable = match addr.parse::<std::net::SocketAddr>() {
                 Ok(sock_addr) => std::net::TcpStream::connect_timeout(
                     &sock_addr,
-                    std::time::Duration::from_secs(3),
+                    std::time::Duration::from_millis(1500),
                 ).is_ok(),
                 Err(_) => false,
             };
 
             if !reachable {
-                log::error!("SDK HEARTBEAT | {ip} unreachable â€” reconnecting");
-                self.reconnect_single(&ip);
+                if has_valid_handle {
+                    log::warn!("SDK HEARTBEAT | {ip} сүлжээнд холбогдохгүй байна (unreachable)");
+                    self.mark_disconnected(&ip);
+                }
+            } else {
+                if !has_valid_handle {
+                    log::info!("SDK HEARTBEAT | {ip} сүлжээнд орж ирлээ, SDK холболт сэргээж байна...");
+                    self.reconnect_single(&ip);
+                }
             }
         }
     }

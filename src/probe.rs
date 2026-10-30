@@ -28,9 +28,17 @@ pub async fn resolve_port(ip: &str, preferred: u16) -> u16 {
         }
     }
 
-    let port = probe(ip, preferred).await;
-    CACHE.lock().unwrap().insert(ip.to_string(), CacheEntry { port, checked_at: Instant::now() });
-    port
+    match probe(ip, preferred).await {
+        Some(port) => {
+            CACHE.lock().unwrap().insert(ip.to_string(), CacheEntry { port, checked_at: Instant::now() });
+            port
+        }
+        None => {
+            // Хоёул хаалттай (камер offline) бол кэшлэхгүй — дараагийн оролдлого шууд дахин шалгана
+            CACHE.lock().unwrap().remove(ip);
+            preferred
+        }
+    }
 }
 
 /// Тухайн IP-н кэшийг хүчингүй болгоно — жинхэнэ хүсэлт холболтын алдаагаар
@@ -39,17 +47,16 @@ pub fn invalidate(ip: &str) {
     CACHE.lock().unwrap().remove(ip);
 }
 
-async fn probe(ip: &str, preferred: u16) -> u16 {
+async fn probe(ip: &str, preferred: u16) -> Option<u16> {
     let other = if preferred == 443 { 80 } else { 443 };
     if tcp_open(ip, preferred).await {
-        return preferred;
+        return Some(preferred);
     }
     if tcp_open(ip, other).await {
         println!("[{ip}] Port {preferred} хаалттай байна, {other} дээр ажиллаж байна — автоматаар сэлгэлээ");
-        return other;
+        return Some(other);
     }
-    // хоёул хаалттай бол configured-оо буцаагаад дуудагч тал алдааг харуулна
-    preferred
+    None
 }
 
 async fn tcp_open(ip: &str, port: u16) -> bool {
