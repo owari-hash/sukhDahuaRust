@@ -1,10 +1,21 @@
 //! Posts plate events to the Node.js server.
 
-use std::time::Duration;
+use std::collections::HashMap;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 use log::{warn, error};
+use once_cell::sync::Lazy;
 use reqwest::Client;
 use serde::Serialize;
 use tokio::time::sleep;
+
+struct ApprovedPlate {
+    turul: String,
+    approved_at: Instant,
+}
+
+static RESIDENT_CACHE: Lazy<Mutex<HashMap<String, ApprovedPlate>>> = Lazy::new(|| Mutex::new(HashMap::new()));
+const RESIDENT_CACHE_TTL: Duration = Duration::from_secs(86400); // 24 цаг хадгална
 
 use crate::config::ServerConfig;
 use crate::camera_manager::PlateEvent;
@@ -26,11 +37,44 @@ impl PlateService {
     pub fn new(cfg: ServerConfig) -> anyhow::Result<Self> {
         let client = Client::builder()
             .timeout(Duration::from_secs(cfg.timeout_secs))
+            .tcp_nodelay(true)
+            .tcp_keepalive(Duration::from_secs(15))
+            .pool_idle_timeout(Duration::from_secs(90))
+            .pool_max_idle_per_host(10)
             .build()?;
         Ok(Self { client, cfg })
     }
 
     pub async fn process_plate(&self, event: &PlateEvent) {
+        let is_entrance = crate::camera_manager::CAMERA_MANAGER
+            .get()
+            .map(|m| m.is_entrance(&event.camera_ip))
+            .unwrap_or(true);
+
+        // ⚡ ХЭТ ХУРДАН 5ms ОРОЛТ: Хэрэв машин өмнө нь Оршин суугч/Харилцагч/VIP-ээр баталгаажсан бол
+        // интернэт серверийн хариуг ч хүлээлгүй 5ms-ийн дотор шууд шлагбаумыг нээнэ!
+        if is_entrance {
+            let is_cached = {
+                let map = RESIDENT_CACHE.lock().unwrap();
+                if let Some(entry) = map.get(&event.plate) {
+                    entry.approved_at.elapsed() < RESIDENT_CACHE_TTL
+                } else {
+                    false
+                }
+            };
+
+            if is_cached {
+                if let Some(mgr) = crate::camera_manager::CAMERA_MANAGER.get() {
+                    let ip_open = event.camera_ip.clone();
+                    let dugaar_open = event.plate.clone();
+                    log::info!("⚡ [INSTANT 5ms OPEN] Plate {dugaar_open} locally verified in cache, opening gate instantly!");
+                    std::thread::spawn(move || {
+                        let _ = mgr.open_gate(&ip_open, Some(&dugaar_open));
+                    });
+                }
+            }
+        }
+
         let payload = PlatePayload {
             mashiniiDugaar: &event.plate,
             CAMERA_IP:      &event.camera_ip,
@@ -104,6 +148,9 @@ impl PlateService {
 
             if let Some(aldaa) = has_aldaa {
                 warn!("PLATE DENIED | plate={dugaar} camera={ip} shaltgaan={aldaa}");
+                if let Ok(mut map) = RESIDENT_CACHE.lock() {
+                    map.remove(&dugaar);
+                }
                 if let Err(e) = crate::api::sambar_burtgelgui(&ip, &dugaar).await {
                     error!("❌ [SAMBAR] бүртгэлгүй машин бичиж чадсангүй: {e}");
                 }
@@ -123,6 +170,22 @@ impl PlateService {
                         .and_then(|v| v.get("turul").and_then(|t| t.as_str()))
                         .unwrap_or("");
                     log::info!("PLATE APPROVED (ENTRANCE) | plate={dugaar} camera={ip} turul={turul} — opening gate immediately");
+
+                    // Оршин суугч/Харилцагч машиныг локал кэшинд хадгална -> дараагийн удаа 5ms-д шууд нээгдэнэ!
+                    let is_resident_type = turul.contains("Оршин суугч") || 
+                        turul.contains("Харилцагч") || 
+                        turul.contains("VIP") || 
+                        turul.contains("СӨХ") || 
+                        turul.contains("Үнэгүй");
+
+                    if is_resident_type {
+                        if let Ok(mut map) = RESIDENT_CACHE.lock() {
+                            map.insert(dugaar.clone(), ApprovedPlate {
+                                turul: turul.to_string(),
+                                approved_at: Instant::now(),
+                            });
+                        }
+                    }
 
                     // ШУУД ХААЛТ НЭЭХ: Серверээс зөвшөөрөгдсөн хариу ирмэгц Socket.io болон
                     // вэб хөтчийн тойруу замыг хүлээлгүйгээр шлагбаумыг шууд нээнэ.
