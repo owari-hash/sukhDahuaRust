@@ -1,5 +1,7 @@
 ﻿use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
+use once_cell::sync::Lazy;
 use std::ffi::{c_void, c_char, c_int};
 use log::{warn, error};
 use once_cell::sync::OnceCell;
@@ -12,6 +14,7 @@ use crate::sdk::{
     fill_ansi, HANDLE,
 };
 
+static LAST_OPEN: Lazy<Mutex<HashMap<String, Instant>>> = Lazy::new(|| Mutex::new(HashMap::new()));
 pub static CAMERA_MANAGER: OnceCell<CameraManager> = OnceCell::new();
 
 #[derive(Debug, Clone)]
@@ -294,6 +297,17 @@ impl CameraManager {
     /// ack sent back to the server, which is otherwise the only place that
     /// failure detail would ever be visible.
     pub fn open_gate(&self, ip: &str, plate: Option<&str>) -> Result<(), String> {
+        // Хэрэв сүүлийн 2.5 секундэд энэ IP дээр хаалт нээх комманд амжилттай
+        // өгөгдсөн бол шлагбаум аль хэдийн сөхөгдөж байгаа тул давхар импульсийг алгасна.
+        if let Ok(map) = LAST_OPEN.lock() {
+            if let Some(last) = map.get(ip) {
+                if last.elapsed() < std::time::Duration::from_millis(2500) {
+                    log::info!("GATE DEBOUNCE | ip={ip} аль хэдийн нээгдэж байна (давхар коммандыг алгаслаа)");
+                    return Ok(());
+                }
+            }
+        }
+
         let sdk = match DahuaSdk::load() { Ok(s) => s, Err(e) => return Err(format!("sdk_load_failed: {e}")) };
         let handle = match self.handle_for_ip(ip) {
             Some(h) => h,
@@ -312,6 +326,9 @@ impl CameraManager {
             )
         };
         if ret != 0 {
+            if let Ok(mut map) = LAST_OPEN.lock() {
+                map.insert(ip.to_string(), Instant::now());
+            }
             return Ok(());
         }
 
@@ -340,6 +357,9 @@ impl CameraManager {
             )
         };
         if ret2 != 0 {
+            if let Ok(mut map) = LAST_OPEN.lock() {
+                map.insert(ip.to_string(), Instant::now());
+            }
             return Ok(());
         }
 
@@ -370,6 +390,9 @@ impl CameraManager {
                 )
             };
             if ret3 != 0 {
+                if let Ok(mut map) = LAST_OPEN.lock() {
+                    map.insert(ip.to_string(), Instant::now());
+                }
                 log::warn!("GATE OK (plate) | ip={ip} plate={p} — хоосон дугаараар нээгдээгүй, дугаартайгаар нээгдлээ");
                 return Ok(());
             }

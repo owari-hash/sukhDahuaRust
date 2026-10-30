@@ -90,8 +90,25 @@ impl PlateService {
             let dugaar = payload.mashiniiDugaar.to_string();
             let ip = payload.CAMERA_IP.to_string();
 
-            if let Some(aldaa) = json_val.as_ref().and_then(|v| v.get("aldaa").and_then(|a| a.as_str())) {
+            let has_aldaa = json_val.as_ref()
+                .and_then(|v| v.get("aldaa").and_then(|a| a.as_str()))
+                .filter(|a| !a.is_empty());
+
+            let oruulakhgui = json_val.as_ref()
+                .and_then(|v| v.get("oruulakhguiEsekh").and_then(|b| b.as_bool()))
+                .unwrap_or(false);
+
+            let khaalga_neesen = json_val.as_ref()
+                .and_then(|v| v.get("khaalgaNeesen").and_then(|b| b.as_bool()))
+                .unwrap_or(false);
+
+            if let Some(aldaa) = has_aldaa {
                 warn!("PLATE DENIED | plate={dugaar} camera={ip} shaltgaan={aldaa}");
+                if let Err(e) = crate::api::sambar_burtgelgui(&ip, &dugaar).await {
+                    error!("❌ [SAMBAR] бүртгэлгүй машин бичиж чадсангүй: {e}");
+                }
+            } else if oruulakhgui {
+                warn!("PLATE DENIED | plate={dugaar} camera={ip} (оруулахгүй)");
                 if let Err(e) = crate::api::sambar_burtgelgui(&ip, &dugaar).await {
                     error!("❌ [SAMBAR] бүртгэлгүй машин бичиж чадсангүй: {e}");
                 }
@@ -105,12 +122,33 @@ impl PlateService {
                     let turul = json_val.as_ref()
                         .and_then(|v| v.get("turul").and_then(|t| t.as_str()))
                         .unwrap_or("");
-                    log::info!("PLATE APPROVED (ENTRANCE) | plate={dugaar} camera={ip} turul={turul}");
+                    log::info!("PLATE APPROVED (ENTRANCE) | plate={dugaar} camera={ip} turul={turul} — opening gate immediately");
+
+                    // ШУУД ХААЛТ НЭЭХ: Серверээс зөвшөөрөгдсөн хариу ирмэгц Socket.io болон
+                    // вэб хөтчийн тойруу замыг хүлээлгүйгээр шлагбаумыг шууд нээнэ.
+                    if let Some(mgr) = crate::camera_manager::CAMERA_MANAGER.get() {
+                        let ip_open = ip.clone();
+                        let dugaar_open = dugaar.clone();
+                        std::thread::spawn(move || {
+                            let _ = mgr.open_gate(&ip_open, Some(&dugaar_open));
+                        });
+                    }
+
                     if let Err(e) = crate::api::sambar_registered(&ip, &dugaar, turul).await {
                         error!("❌ [SAMBAR] бүртгэлтэй машин бичиж чадсангүй: {e}");
                     }
                 } else {
-                    log::info!("PLATE APPROVED (EXIT) | plate={dugaar} camera={ip} (гарцын самбарыг socket sambar-show дүнтэй нь бичнэ)");
+                    log::info!("PLATE APPROVED (EXIT) | plate={dugaar} camera={ip} khaalga_neesen={khaalga_neesen}");
+                    // Хэрэв гарц дээр төлбөргүй/үнэгүй/төлөгдсөн бол шууд хаалга нээх
+                    if khaalga_neesen {
+                        if let Some(mgr) = crate::camera_manager::CAMERA_MANAGER.get() {
+                            let ip_open = ip.clone();
+                            let dugaar_open = dugaar.clone();
+                            std::thread::spawn(move || {
+                                let _ = mgr.open_gate(&ip_open, Some(&dugaar_open));
+                            });
+                        }
+                    }
                 }
             }
         }
